@@ -223,13 +223,26 @@ fn evaluate_sheet(R: i32, C: i32, sheet: &mut Vec<Vec<cell>>) {
 }
 
 fn evaluate_formula(formula: &str, R: i32, C: i32, sheet: &Vec<Vec<cell>>, error_flag: &mut i32) -> i32 {
+    // First, check if it's a range function like MAX, MIN, AVG, etc.
+    if formula.contains("(") && formula.contains(":") && formula.contains(")") {
+        let open_paren = formula.find('(').unwrap();
+        let func_name = &formula[0..open_paren];
+        let close_paren = formula.find(')').unwrap();
+        let range = &formula[open_paren+1..close_paren];
+        
+        // Check if it's a valid range function
+        if func_name == "MAX" || func_name == "MIN" || func_name == "AVG" || 
+           func_name == "SUM" || func_name == "STDEV" {
+            return evaluate_range(range, R, C, sheet, func_name);
+        }
+    }
+    
     if formula.starts_with("SLEEP(") {
         let inner = &formula[6..formula.len()-1];
         // In evaluate_formula() SLEEP handling:
         if let Ok(value) = inner.trim().parse::<i32>() {
             // Handling SLEEP(value)
             let sleep_start = Instant::now();
-            let start_time = unsafe { clock() };
             std::thread::sleep(std::time::Duration::from_secs(value as u64));
             let sleep_end = Instant::now();
             let duration = sleep_end.duration_since(sleep_start).as_secs_f64();
@@ -267,11 +280,10 @@ fn evaluate_formula(formula: &str, R: i32, C: i32, sheet: &Vec<Vec<cell>>, error
                         } else {
                             true
                         };
-                        if  formula_changed {
+                        if formula_changed {
                             prev_sleep_formula = Some(formula.to_string());
                             prev_sleep_value = value;
                             let sleep_start = Instant::now();
-                            let start_time = clock();
                             std::thread::sleep(std::time::Duration::from_secs(value as u64));
                             let sleep_end = Instant::now();
                             let duration = sleep_end.duration_since(sleep_start).as_secs_f64();
@@ -281,7 +293,6 @@ fn evaluate_formula(formula: &str, R: i32, C: i32, sheet: &Vec<Vec<cell>>, error
                             if value != prev_sleep_value {
                                 prev_sleep_value = value;
                                 let sleep_start = Instant::now();
-                                let start_time = clock();
                                 std::thread::sleep(std::time::Duration::from_secs(value as u64));
                                 let sleep_end = Instant::now();
                                 let duration = sleep_end.duration_since(sleep_start).as_secs_f64();
@@ -294,13 +305,99 @@ fn evaluate_formula(formula: &str, R: i32, C: i32, sheet: &Vec<Vec<cell>>, error
             }
         }
     }
-    // For other formulas: direct number conversion as in case 9: Direct number (e.g., "42") - No dependency
+    
+    // Handle cell operations (A1 + B2, etc.)
+    if formula.contains(" + ") || formula.contains(" - ") || 
+       formula.contains(" * ") || formula.contains(" / ") {
+        let parts: Vec<&str> = formula.split_whitespace().collect();
+        if parts.len() == 3 {
+            let left = parts[0];
+            let op = parts[1];
+            let right = parts[2];
+            
+            let mut left_val = 0;
+            let mut right_val = 0;
+            let mut left_err = 0;
+            let mut right_err = 0;
+            
+            // Parse left operand
+            if let Ok(num) = left.parse::<i32>() {
+                left_val = num;
+            } else {
+                left_val = get_value_from_formula(left, R, C, sheet, &mut left_err);
+            }
+            
+            // Parse right operand
+            if let Ok(num) = right.parse::<i32>() {
+                right_val = num;
+            } else {
+                right_val = get_value_from_formula(right, R, C, sheet, &mut right_err);
+            }
+            
+            // Check for errors in operands
+            if left_err != 0 || right_err != 0 {
+                *error_flag = 1;
+                return 0;
+            }
+            
+            // Perform the operation
+            match op {
+                "+" => return left_val + right_val,
+                "-" => return left_val - right_val,
+                "*" => return left_val * right_val,
+                "/" => {
+                    if right_val == 0 {
+                        *error_flag = 1; // Division by zero
+                        return 0;
+                    }
+                    return left_val / right_val;
+                },
+                _ => {
+                    *error_flag = 1; // Unknown operator
+                    return 0;
+                }
+            }
+        }
+    }
+    
+    // For direct number conversion as in case 9: Direct number (e.g., "42") - No dependency
     if let Ok(num) = formula.trim().parse::<i32>() {
         return num;
     }
-    // Fallback: use get_value_from_formula
-    *error_flag = 0;
-    get_value_from_formula(formula, R, C, sheet, error_flag)
+    
+    // Check if it's a simple cell reference (e.g., "A1")
+    let mut col = String::new();
+    let mut row = 0;
+    let mut found_letter = false;
+    
+    for c in formula.chars() {
+        if c.is_ascii_alphabetic() {
+            col.push(c);
+            found_letter = true;
+        } else if c.is_digit(10) && found_letter {
+            let digit = c.to_digit(10).unwrap() as i32;
+            row = row * 10 + digit;
+        }
+    }
+    
+    if !col.is_empty() && row > 0 {
+        let col_index = get_col_index(&col);
+        if col_index < 0 || col_index >= C || row < 1 || row > R {
+            *error_flag = 1;
+            return 0;
+        }
+        
+        if sheet[(row - 1) as usize][col_index as usize].err != 0 {
+            *error_flag = 1;
+            return 0;
+        }
+        
+        return sheet[(row - 1) as usize][col_index as usize].val;
+    }
+    
+    // If we get here, it's not a valid formula
+    *error_flag = 1;
+    0
 }
 
 fn build_dependency_graph(R: i32, C: i32, sheet: &Vec<Vec<cell>>, graph: &mut Vec<Option<Box<DAGNode>>>) {
