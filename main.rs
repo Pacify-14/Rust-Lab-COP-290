@@ -1,13 +1,16 @@
 use std::env;
-use std::ffi::CString;
+use std::time::Instant;
 use std::io::{self, BufRead, Write};
 use std::process;
 use std::str;
-use std::time::{Duration, Instant};
+
 
 // Required for using libc clock functions for compatibility
-use libc::{clock, CLOCKS_PER_SEC};
 
+use libc;
+
+// And add these constants:
+const CLOCKS_PER_SEC: i64 = 1_000_000; 
 const VIEWPORT_SIZE: i32 = 10;
 
 static mut inval_r: bool = false;
@@ -226,7 +229,7 @@ fn evaluate_formula(formula: &str, R: i32, C: i32, sheet: &Vec<Vec<cell>>, error
             // Handling SLEEP(value)
             let sleep_start = Instant::now();
             let start_time = unsafe { clock() };
-            while (unsafe { clock() } - start_time) as f64 / CLOCKS_PER_SEC as f64 < value as f64 {
+            while (unsafe { clock() } - start_time) as f64 / (CLOCKS_PER_SEC as f64) < value as f64 {
                 // busy wait
             }
             let sleep_end = Instant::now();
@@ -260,12 +263,17 @@ fn evaluate_formula(formula: &str, R: i32, C: i32, sheet: &Vec<Vec<cell>>, error
                     static mut prev_sleep_formula: Option<String> = None;
                     static mut prev_sleep_value: i32 = -1;
                     unsafe {
-                        if prev_sleep_formula.as_ref().map_or(true, |s| s != formula) {
+                        let formula_changed = if let Some(ref prev) = prev_sleep_formula {
+                            prev != formula
+                        } else {
+                            true
+                        };
+                        if  formula_changed {
                             prev_sleep_formula = Some(formula.to_string());
                             prev_sleep_value = value;
                             let sleep_start = Instant::now();
                             let start_time = clock();
-                            while (clock() - start_time) as f64 / CLOCKS_PER_SEC as f64 < value as f64 {
+                            while (clock() - start_time) as f64 / (CLOCKS_PER_SEC as f64) < value as f64 {
                                 // busy wait
                             }
                             let sleep_end = Instant::now();
@@ -277,7 +285,7 @@ fn evaluate_formula(formula: &str, R: i32, C: i32, sheet: &Vec<Vec<cell>>, error
                                 prev_sleep_value = value;
                                 let sleep_start = Instant::now();
                                 let start_time = clock();
-                                while (clock() - start_time) as f64 / CLOCKS_PER_SEC as f64 < value as f64 {
+                                while (clock() - start_time) as f64 / (CLOCKS_PER_SEC as f64) < value as f64 {
                                     // busy wait
                                 }
                                 let sleep_end = Instant::now();
@@ -377,7 +385,7 @@ fn build_dependency_graph(R: i32, C: i32, sheet: &Vec<Vec<cell>>, graph: &mut Ve
                         if let Ok(n) = n1.parse::<i32>() {
                             num1 = n;
                         } else {
-                            0
+                            ()
                         }
                     }
                     let op_part = parts.next().unwrap_or("");
@@ -655,7 +663,7 @@ fn dfs(graph: &Vec<Option<Box<DAGNode>>>, R: i32, C: i32, curr: usize, target: u
             if !visited[next] && dfs(graph, R, C, next, target, visited) {
                 return true;
             }
-            node_opt = node.next.as_ref().map(|b| &**b);
+            node_opt = node.next.as_ref().map(|b| b as &Box<Node>);
         }
     }
     false
@@ -871,8 +879,10 @@ fn parse_range(range: &str, start_row: &mut i32, end_row: &mut i32, start_col: &
             return -1; // Invalid range
         }
         
-        *start_row = *end_row = row1 - 1;
-        *start_col = *end_col = get_col_index(&col1);
+        *start_row = row1 - 1;
+*end_row = row1 - 1;
+*start_col = get_col_index(&col1);
+*end_col = get_col_index(&col1);
     }
     
     0 // Success
@@ -1097,8 +1107,9 @@ fn main() {
             }
         }
         unsafe {
-            print!("[{:.2}]", sleeptimetotal);
-            sleeptimetotal = 0.0;  // Reset after printing
+            let sleep_time = sleeptimetotal;  // Copy the value to a local variable
+    sleeptimetotal = 0.0;  // Reset immediately
+    print!("[{:.2}]", sleep_time);  // Reset after printing
             if unrec_cmd {
                 print!(" (unrecognized cmd) > ");
             } else if inval_r {
@@ -1113,10 +1124,9 @@ fn main() {
         input_line.clear();
     }
 }
-  
-fn clock() -> i64 {
-    unsafe { libc::clock() }
-}
-  
-// End of code
 
+
+fn clock() -> i64 {
+    unsafe { libc::time(std::ptr::null_mut()) as i64 }
+}
+// End of code
