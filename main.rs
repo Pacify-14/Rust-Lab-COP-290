@@ -13,7 +13,7 @@ const VIEWPORT_SIZE: i32 = 10;
 static mut inval_r: bool = false;
 static mut unrec_cmd: bool = false;
 // Add near other global declarations
-static mut sleeptimetotal: f64 = 0.0;
+static mut sleeptimetotal: f64 = 0.0 ;
 
 #[derive(Clone)]
 pub struct cell {
