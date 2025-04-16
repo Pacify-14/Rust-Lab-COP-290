@@ -209,16 +209,17 @@ fn get_col_index(col: &str) -> i32 {
 fn evaluate_sheet(R: i32, C: i32, sheet: &mut Vec<Vec<cell>>) {
     let total_cells = (R * C) as usize;
     let mut graph: Vec<Option<Box<DAGNode>>> = Vec::with_capacity(total_cells);
+    
+    // Initialize all elements in the graph vector
     for _ in 0..total_cells {
-        let node = Box::new(DAGNode {
+        graph.push(Some(Box::new(DAGNode {
             in_degree: 0,
             dependents: None,
-        });
-        graph.push(Some(node));
+        })));
     }
+    
     build_dependency_graph(R, C, sheet, &mut graph);
     topological_evaluation(R, C, sheet, &mut graph);
-    // Free memory: Rust will drop boxes automatically.
 }
 
 fn evaluate_formula(formula: &str, R: i32, C: i32, sheet: &Vec<Vec<cell>>, error_flag: &mut i32) -> i32 {
@@ -229,9 +230,7 @@ fn evaluate_formula(formula: &str, R: i32, C: i32, sheet: &Vec<Vec<cell>>, error
             // Handling SLEEP(value)
             let sleep_start = Instant::now();
             let start_time = unsafe { clock() };
-            while (unsafe { clock() } - start_time) as f64 / (CLOCKS_PER_SEC as f64) < value as f64 {
-                // busy wait
-            }
+            std::thread::sleep(std::time::Duration::from_secs(value as u64));
             let sleep_end = Instant::now();
             let duration = sleep_end.duration_since(sleep_start).as_secs_f64();
             unsafe {
@@ -273,9 +272,7 @@ fn evaluate_formula(formula: &str, R: i32, C: i32, sheet: &Vec<Vec<cell>>, error
                             prev_sleep_value = value;
                             let sleep_start = Instant::now();
                             let start_time = clock();
-                            while (clock() - start_time) as f64 / (CLOCKS_PER_SEC as f64) < value as f64 {
-                                // busy wait
-                            }
+                            std::thread::sleep(std::time::Duration::from_secs(value as u64));
                             let sleep_end = Instant::now();
                             let duration = sleep_end.duration_since(sleep_start).as_secs_f64();
                             sleeptimetotal += duration; // Update only for SLEEP
@@ -285,9 +282,7 @@ fn evaluate_formula(formula: &str, R: i32, C: i32, sheet: &Vec<Vec<cell>>, error
                                 prev_sleep_value = value;
                                 let sleep_start = Instant::now();
                                 let start_time = clock();
-                                while (clock() - start_time) as f64 / (CLOCKS_PER_SEC as f64) < value as f64 {
-                                    // busy wait
-                                }
+                                std::thread::sleep(std::time::Duration::from_secs(value as u64));
                                 let sleep_end = Instant::now();
                                 let duration = sleep_end.duration_since(sleep_start).as_secs_f64();
                                 sleeptimetotal += duration; // Update only for SLEEP
@@ -652,25 +647,50 @@ fn topological_evaluation(R: i32, C: i32, sheet: &mut Vec<Vec<cell>>, graph: &mu
 }
 
 fn dfs(graph: &Vec<Option<Box<DAGNode>>>, R: i32, C: i32, curr: usize, target: usize, visited: &mut Vec<bool>) -> bool {
+    let total = (R * C) as usize;
+    
+    // Check if current index is valid
+    if curr >= total {
+        return false;
+    }
+    
     if curr == target {
         return true;
     }
+    
     visited[curr] = true;
+    
     if let Some(ref dag) = graph[curr] {
         let mut node_opt = dag.dependents.as_ref();
         while let Some(node) = node_opt {
-            let next = (node.cell.row * C + node.cell.col) as usize;
-            if !visited[next] && dfs(graph, R, C, next, target, visited) {
-                return true;
+            let next_row = node.cell.row;
+            let next_col = node.cell.col;
+            
+            // Validate row and column before calculating index
+            if next_row >= 0 && next_row < R && next_col >= 0 && next_col < C {
+                let next = (next_row * C + next_col) as usize;
+                
+                // Double-check index is in bounds
+                if next < total && !visited[next] && dfs(graph, R, C, next, target, visited) {
+                    return true;
+                }
             }
+            
             node_opt = node.next.as_ref().map(|b| b as &Box<Node>);
         }
     }
+    
     false
 }
 
 fn is_reachable(graph: &Vec<Option<Box<DAGNode>>>, R: i32, C: i32, src: usize, target: usize) -> bool {
     let total = (R * C) as usize;
+    
+    // Check if indices are valid
+    if src >= total || target >= total {
+        return false;
+    }
+    
     let mut visited = vec![false; total];
     let result = dfs(graph, R, C, src, target, &mut visited);
     result
@@ -680,17 +700,31 @@ fn is_reachable(graph: &Vec<Option<Box<DAGNode>>>, R: i32, C: i32, src: usize, t
 // dep_row/dep_col: the cell that depends on the reference cell (i.e. contains the formula)
 // ref_row/ref_col: the cell that is referenced (and hence must be computed first)
 fn add_dependency(graph: &mut Vec<Option<Box<DAGNode>>>, dep_row: i32, dep_col: i32, ref_row: i32, ref_col: i32, R: i32, C: i32) {
+    // Validate all indices are in bounds
+    if dep_row < 0 || dep_row >= R || dep_col < 0 || dep_col >= C ||
+       ref_row < 0 || ref_row >= R || ref_col < 0 || ref_col >= C {
+        return;  // Skip invalid indices
+    }
+    
     let dependent_index = (dep_row * C + dep_col) as usize;
     let reference_index = (ref_row * C + ref_col) as usize;
+    
+    let total_cells = (R * C) as usize;
+    if dependent_index >= total_cells || reference_index >= total_cells {
+        return;  // Skip if indices are out of bounds
+    }
+    
     if is_reachable(graph, R, C, dependent_index, reference_index) {
         unsafe { cycle_detected = true; }
         return;  // Ignore this dependency addition
     }
+    
     // Create a new node for the dependency edge.
     let new_node = Box::new(Node {
         cell: CellRef { row: dep_row, col: dep_col },
         next: None,
     });
+    
     // Insert the new node at the beginning of the reference cell's dependent list.
     if let Some(ref mut dag) = graph[reference_index] {
         let prev = dag.dependents.take();
@@ -698,6 +732,7 @@ fn add_dependency(graph: &mut Vec<Option<Box<DAGNode>>>, dep_row: i32, dep_col: 
         node_to_insert.next = prev;
         dag.dependents = Some(node_to_insert);
     }
+    
     // Increase the in-degree of the dependent cell.
     if let Some(ref mut dag) = graph[dependent_index] {
         dag.in_degree += 1;
@@ -1047,7 +1082,10 @@ fn main() {
         let total_cells = (R * C) as usize;
         let mut graph: Vec<Option<Box<DAGNode>>> = Vec::with_capacity(total_cells);
         for _ in 0..total_cells {
-            graph.push(None);
+            graph.push(Some(Box::new(DAGNode {
+                in_degree: 0,
+                dependents: None,
+            })));
         }
         build_dependency_graph(R, C, &sheet, &mut graph);
         unsafe {
