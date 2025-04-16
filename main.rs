@@ -751,22 +751,199 @@ fn check_invalid_range(formula: &str) -> i32 {
 }
 
 fn evaluate_range(range: &str, R: i32, C: i32, sheet: &Vec<Vec<cell>>, func: &str) -> i32 {
-    // Minimal placeholder implementation returning 0.
-    0
+    let mut start_row = 0;
+    let mut end_row = 0;
+    let mut start_col = 0;
+    let mut end_col = 0;
+    
+    if parse_range(range, &mut start_row, &mut end_row, &mut start_col, &mut end_col) != 0 {
+        unsafe { inval_r = true; }
+        return 0; // Error in range
+    }
+    
+    let total_cells = (end_row - start_row + 1) * (end_col - start_col + 1);
+    let mut values: Vec<i32> = Vec::with_capacity(total_cells as usize);
+    
+    // Iterate over the range and check for error cells
+    for i in start_row..=end_row {
+        for j in start_col..=end_col {
+            if sheet[i as usize][j as usize].err != 0 {
+                // If any cell is already in error, indicate error for the range
+                unsafe { inval_r = true; }
+                return 0;
+            }
+            values.push(sheet[i as usize][j as usize].val);
+        }
+    }
+    
+    let count = values.len();
+    let mut result = 0;
+    
+    if func == "SUM" {
+        for val in &values {
+            result += val;
+        }
+    } else if func == "AVG" {
+        if count > 0 {
+            for val in &values {
+                result += val;
+            }
+            result /= count as i32;
+        }
+    } else if func == "MIN" {
+        if count > 0 {
+            result = std::i32::MAX;
+            for val in &values {
+                if *val < result {
+                    result = *val;
+                }
+            }
+        }
+    } else if func == "MAX" {
+        if count > 0 {
+            result = std::i32::MIN;
+            for val in &values {
+                if *val > result {
+                    result = *val;
+                }
+            }
+        }
+    } else if func == "STDEV" {
+        result = stdev(&values);
+    }
+    
+    result
 }
 
 fn parse_range(range: &str, start_row: &mut i32, end_row: &mut i32, start_col: &mut i32, end_col: &mut i32) -> i32 {
-    // Minimal placeholder implementation
-    0
+    let mut col1 = String::new();
+    let mut col2 = String::new();
+    let mut row1: i32 = 0;
+    let mut row2: i32 = 0;
+    
+    // Check if it's a range (A1:B2 format)
+    if let Some(colon_pos) = range.find(':') {
+        let (first_part, second_part) = range.split_at(colon_pos);
+        let second_part = &second_part[1..]; // Skip the colon
+        
+        // Parse first part (A1)
+        for c in first_part.chars() {
+            if c.is_ascii_alphabetic() {
+                col1.push(c);
+            } else if c.is_digit(10) {
+                let digit = c.to_digit(10).unwrap() as i32;
+                row1 = row1 * 10 + digit;
+            }
+        }
+        
+        // Parse second part (B2)
+        for c in second_part.chars() {
+            if c.is_ascii_alphabetic() {
+                col2.push(c);
+            } else if c.is_digit(10) {
+                let digit = c.to_digit(10).unwrap() as i32;
+                row2 = row2 * 10 + digit;
+            }
+        }
+        
+        *start_row = row1 - 1;
+        *end_row = row2 - 1;
+        *start_col = get_col_index(&col1);
+        *end_col = get_col_index(&col2);
+        
+        if *start_row > *end_row || *start_col > *end_col {
+            unsafe { inval_r = true; }
+            return -1; // Invalid range
+        }
+    } else {
+        // Single cell reference (A1 format)
+        for c in range.chars() {
+            if c.is_ascii_alphabetic() {
+                col1.push(c);
+            } else if c.is_digit(10) {
+                let digit = c.to_digit(10).unwrap() as i32;
+                row1 = row1 * 10 + digit;
+            }
+        }
+        
+        if col1.is_empty() || row1 == 0 {
+            unsafe { inval_r = true; }
+            return -1; // Invalid range
+        }
+        
+        *start_row = *end_row = row1 - 1;
+        *start_col = *end_col = get_col_index(&col1);
+    }
+    
+    0 // Success
 }
 
 fn stdev(values: &Vec<i32>) -> i32 {
-    // Minimal placeholder implementation
-    0
+    let count = values.len();
+    if count <= 1 {  // Need at least 2 values for standard deviation
+        return 0;
+    }
+    
+    // Calculate mean
+    let mut mean = 0.0;
+    for val in values {
+        mean += *val as f64;
+    }
+    mean /= count as f64;
+    
+    // Calculate sum of squared differences from mean
+    let mut sum_squared_diff = 0.0;
+    for val in values {
+        let diff = *val as f64 - mean;
+        sum_squared_diff += diff * diff;
+    }
+    
+    // Calculate standard deviation
+    // Using population standard deviation formula: sqrt(Σ(x - μ)²/n)
+    let stdev = (sum_squared_diff / count as f64).sqrt();
+    
+    // Round to nearest integer
+    (stdev + 0.5) as i32
 }
 
 fn get_value_from_formula(formula: &str, R: i32, C: i32, sheet: &Vec<Vec<cell>>, error_flag: &mut i32) -> i32 {
-    // Minimal placeholder implementation
+    let mut col = String::new();
+    let mut row = 0;
+    
+    // Parse cell reference (e.g., "A1")
+    let mut found_letter = false;
+    for c in formula.chars() {
+        if c.is_ascii_alphabetic() {
+            col.push(c);
+            found_letter = true;
+        } else if c.is_digit(10) && found_letter {
+            let digit = c.to_digit(10).unwrap() as i32;
+            row = row * 10 + digit;
+        }
+    }
+    
+    if !col.is_empty() && row > 0 {
+        let col_index = get_col_index(&col);
+        if col_index < 0 || col_index >= C || row < 1 || row > R {
+            *error_flag = 1;
+            return 0;
+        }
+        
+        if sheet[(row - 1) as usize][col_index as usize].err != 0 {
+            *error_flag = 1;
+            return 0;
+        }
+        
+        return sheet[(row - 1) as usize][col_index as usize].val;
+    }
+    
+    // Try to parse as a direct number
+    if let Ok(value) = formula.trim().parse::<i32>() {
+        return value;
+    }
+    
+    // If we get here, it's not a valid formula
+    *error_flag = 1;
     0
 }
 
