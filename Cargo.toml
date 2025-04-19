@@ -1,0 +1,10 @@
+[package]
+name = "spreadsheet"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+regex = "1.10.2"  
+libc = "0.2"
+clap = "4.4.11"
+crossterm = "0.27.0"
