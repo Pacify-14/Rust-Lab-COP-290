@@ -1,0 +1,1259 @@
+#![allow(warnings)]
+use std::env;
+use std::time::Instant;
+use std::io::{self, BufRead, Write};
+use std::process;
+use std::str;
+use regex::Regex;
+
+// Required for using libc clock functions for compatibility
+
+use libc;
+
+// And add these constants:
+const _CLOCKS_PER_SEC: i64 = 1_000_000; 
+const VIEWPORT_SIZE: i32 = 10;
+#[allow(non_camel_case_types)]
+static mut inval_r: bool = false;
+static mut unrec_cmd: bool = false;
+// Add near other global declarations
+static mut sleeptimetotal: f64 = 0.0 ;
+
+#[derive(Clone)]
+#[allow(non_camel_case_types)]
+pub struct cell {
+    pub val: i32,
+    pub formula: Option<String>,
+    pub err: i32, // 1 if the cell contains an error, 0 otherwise
+}
+
+#[derive(Copy, Clone)]
+pub struct CellUpdate {
+    pub row: i32,
+    pub col: i32,
+    pub is_updated: bool,
+}
+
+static mut last_update: CellUpdate = CellUpdate { row: -1, col: -1, is_updated: false };
+
+#[derive(Copy, Clone)]
+pub struct CellRef {
+    pub row: i32,
+    pub col: i32,
+}
+
+pub struct Node {
+    pub cell: CellRef,
+    pub next: Option<Box<Node>>,
+}
+
+pub struct DAGNode {
+    pub in_degree: i32,
+    pub dependents: Option<Box<Node>>,
+}
+
+fn print_sheet(R: i32, C: i32, sheet: &Vec<Vec<cell>>, row_offset: i32, col_offset: i32, output_enabled: i32) {
+    if output_enabled == 0 {
+        return;
+    }
+    print!("  ");
+    print_columns(C, col_offset);
+    println!("\n");
+    for i in row_offset..(row_offset + VIEWPORT_SIZE) {
+        if i >= R { break; }
+        print!("{}\t", i + 1);
+        for j in col_offset..(col_offset + VIEWPORT_SIZE) {
+            if j >= C { break; }
+            if sheet[i as usize][j as usize].err != 0 {
+                print!("ERR\t"); // Display "ERR" for cells with errors
+            } else {
+                print!("{}\t", sheet[i as usize][j as usize].val);
+            }
+        }
+        println!();
+    }
+}
+
+fn print_columns(C: i32, col_offset: i32) {
+    print!("\t");
+    for i in col_offset..(col_offset + VIEWPORT_SIZE) {
+        if i >= C { break; }
+        let mut temp = i;
+        let mut label = String::new();
+        temp += 1; // Make 1-based for easier mapping
+        while temp > 0 {
+            let rem = (temp - 1) % 26;
+            label.insert(0, (b'A' + rem as u8) as char);
+            temp = (temp - 1) / 26;
+        }
+        print!("{}\t", label);
+    }
+    println!();
+}
+
+fn process_input(input: &str, R: i32, C: i32, sheet: &mut Vec<Vec<cell>>, row_offset: &mut i32, col_offset: &mut i32, output_enabled: &mut i32) {
+    unsafe {
+        sleeptimetotal = 0.0;
+    }
+    if input == "q" {
+        process::exit(0);
+    } else if input == "w" {
+        *row_offset = if *row_offset >= 10 { *row_offset - 10 } else { 0 };
+        return;
+    } else if input == "s" {
+        *row_offset = if *row_offset + 10 < R { *row_offset + 10 } else { *row_offset };
+        return;
+    } else if input == "a" {
+        *col_offset = if *col_offset >= 10 { *col_offset - 10 } else { 0 };
+        return;
+    } else if input == "d" {
+        *col_offset = if *col_offset + 10 < C { *col_offset + 10 } else { *col_offset };
+        return;
+    } else if input.starts_with("scroll_to") {
+        let parts: Vec<&str> = input[10..].trim().split_whitespace().collect();
+        if parts.len() >= 1 {
+            // Expect format like "A1"
+            let col_str: String = parts[0].chars().take_while(|c| c.is_alphabetic()).collect();
+            let row_str: String = parts[0].chars().skip_while(|c| c.is_alphabetic()).collect();
+            if let Ok(row) = row_str.parse::<i32>() {
+                let colIndex = get_col_index(&col_str);
+                if colIndex >= 0 && colIndex < C && row >= 1 && row <= R {
+                    *row_offset = row - 1;
+                    *col_offset = colIndex;
+                }
+            }
+        }
+        return;
+    } else if input == "disable_output" {
+        *output_enabled = 0;
+        return;
+    } else if input == "enable_output" {
+        *output_enabled = 1;
+        return;
+    }
+    let mut col = String::new();
+    let mut formula = String::new();
+    let mut row: i32 = 0;
+    // This replicates: if (sscanf(input, "%[A-Z]%d=%[^\n]", col, &row, formula) == 3)
+    {
+        let mut chars = input.chars();
+        while let Some(c) = chars.clone().next() {
+            if c.is_ascii_alphabetic() {
+                col.push(c);
+                chars.next();
+            } else {
+                break;
+            }
+        }
+        let rest: String = chars.collect();
+        let parts: Vec<&str> = rest.split('=').collect();
+        if parts.len() == 2 {
+            let row_part = parts[0].trim();
+            let formula_part = parts[1].trim();
+            if let Ok(r) = row_part.parse::<i32>() {
+                row = r;
+                formula = formula_part.to_string();
+            }
+        }
+    }
+    if !col.is_empty() && row != 0 && !formula.is_empty() {
+        let colIndex = get_col_index(&col);
+        if colIndex > C || row > R {
+            unsafe { inval_r = true; }
+            return;
+        }
+        if colIndex >= 0 && colIndex < C && row >= 1 && row <= R {
+            // Check for invalid range before storing the formula
+            if check_invalid_range(&formula) != 0 {
+                unsafe { inval_r = true; }
+                // Don't store the formula if range is invalid
+                return;
+            }
+            // Store the formula only if range is valid
+            let r_index = (row - 1) as usize;
+            let c_index = colIndex as usize;
+            sheet[r_index][c_index].formula = Some(formula.to_string());
+            unsafe {
+                last_update.row = row - 1;
+                last_update.col = colIndex;
+                last_update.is_updated = true;
+                unrec_cmd = false;
+            }
+            return;
+        }
+    }
+    unsafe {
+        last_update.is_updated = false;
+        unrec_cmd = true;
+    }
+}
+
+fn get_col_index(col: &str) -> i32 {
+    // Convert column string (e.g., "A", "AB") to index (0-based)
+    let mut index: i32 = 0;
+    for c in col.chars() {
+        if c >= 'A' && c <= 'Z' {
+            index = index * 26 + (c as i32 - 'A' as i32 + 1);
+        } else {
+            return -1;
+        }
+    }
+    return index - 1;
+}
+
+fn evaluate_sheet(R: i32, C: i32, sheet: &mut Vec<Vec<cell>>) {
+    let total_cells = (R * C) as usize;
+    let mut graph: Vec<Option<Box<DAGNode>>> = Vec::with_capacity(total_cells);
+
+    // Initialize all elements in the graph vector
+    for _ in 0..total_cells {
+        graph.push(Some(Box::new(DAGNode {
+            in_degree: 0,
+            dependents: None,
+        })));
+    }
+
+    build_dependency_graph(R, C, sheet, &mut graph);
+    topological_evaluation(R, C, sheet, &mut graph);
+}
+
+fn evaluate_formula(formula: &str, R: i32, C: i32, sheet: &Vec<Vec<cell>>, error_flag: &mut i32) -> i32 {
+    // First, check if it's a range function like MAX, MIN, AVG, etc.
+    if formula.contains("(") && formula.contains(":") && formula.contains(")") {
+        let open_paren = formula.find('(').unwrap();
+        let func_name = &formula[0..open_paren];
+        let close_paren = formula.find(')').unwrap();
+        let range = &formula[open_paren+1..close_paren];
+
+        // Check if it's a valid range function
+        if func_name == "MAX" || func_name == "MIN" || func_name == "AVG" || 
+            func_name == "SUM" || func_name == "STDEV" {
+                return evaluate_range(range, R, C, sheet, func_name);
+        }
+    }
+
+    if formula.starts_with("SLEEP(") {
+        let inner = &formula[6..formula.len()-1];
+        // In evaluate_formula() SLEEP handling:
+        if let Ok(value) = inner.trim().parse::<i32>() {
+            // Handling SLEEP(value)
+            let sleep_start = Instant::now();
+            std::thread::sleep(std::time::Duration::from_secs(value as u64));
+            let sleep_end = Instant::now();
+            let duration = sleep_end.duration_since(sleep_start).as_secs_f64();
+            unsafe {
+                sleeptimetotal += duration; // Update only for SLEEP
+            }
+            return value;
+        } else {
+            // For SLEEP with a cell reference, pattern: SLEEP(%[A-Z]%d)
+            let mut col = String::new();
+            let mut row_str = String::new();
+            for c in inner.chars() {
+                if c.is_ascii_alphabetic() {
+                    col.push(c);
+                } else {
+                    break;
+                }
+            }
+            row_str = inner[col.len()..].trim().to_string();
+            if let Ok(row) = row_str.parse::<i32>() {
+                let col_idx = get_col_index(&col);
+                let row_idx = row - 1;
+                if col_idx >= 0 && row_idx >= 0 && row_idx < R {
+                    if sheet[row_idx as usize][col_idx as usize].err != 0 {
+                        *error_flag = 1; // Propagate error from referenced cell
+                        return 0;
+                    }
+                    let value = sheet[row_idx as usize][col_idx as usize].val;
+                    // Static variables for previous sleep formula and value
+                    static mut prev_sleep_formula: Option<String> = None;
+                    static mut prev_sleep_value: i32 = -1;
+                    unsafe {
+                        let formula_changed = if let Some(ref prev) = prev_sleep_formula {
+                            prev != formula
+                        } else {
+                            true
+                        };
+                        if formula_changed {
+                            prev_sleep_formula = Some(formula.to_string());
+                            prev_sleep_value = value;
+                            let sleep_start = Instant::now();
+                            std::thread::sleep(std::time::Duration::from_secs(value as u64));
+                            let sleep_end = Instant::now();
+                            let duration = sleep_end.duration_since(sleep_start).as_secs_f64();
+                            sleeptimetotal += duration; // Update only for SLEEP
+                        } else {
+                            // Same formula as before. If its argument value differs from the last time, then sleep again.
+                            if value != prev_sleep_value {
+                                prev_sleep_value = value;
+                                let sleep_start = Instant::now();
+                                std::thread::sleep(std::time::Duration::from_secs(value as u64));
+                                let sleep_end = Instant::now();
+                                let duration = sleep_end.duration_since(sleep_start).as_secs_f64();
+                                sleeptimetotal += duration; // Update only for SLEEP
+                            }
+                        }
+                    }
+                    return value;
+                }
+            }
+        }
+    }
+
+    // Regex to match expressions like A1+A2, 2+A3, A4+3, 3+4, etc.
+    let re = Regex::new(r"^\s*([A-Z]+\d+|\d+)\s*([\+\-\*/])\s*([A-Z]+\d+|\d+)\s*$").unwrap();
+
+    if let Some(caps) = re.captures(formula) {
+        let left = &caps[1];
+        let op = &caps[2];
+        let right = &caps[3];
+
+        let mut left_val = 0;
+        let mut right_val = 0;
+        let mut left_err = 0;
+        let mut right_err = 0;
+
+        // Parse left operand
+        if let Ok(num) = left.parse::<i32>() {
+            left_val = num;
+        } else {
+            left_val = get_value_from_formula(left, R, C, sheet, &mut left_err);
+        }
+
+        // Parse right operand
+        if let Ok(num) = right.parse::<i32>() {
+            right_val = num;
+        } else {
+            right_val = get_value_from_formula(right, R, C, sheet, &mut right_err);
+        }
+
+        if left_err != 0 || right_err != 0 {
+            *error_flag = 1;
+            return 0;
+        }
+
+        return match op {
+            "+" => left_val + right_val,
+            "-" => left_val - right_val,
+            "*" => left_val * right_val,
+            "/" => {
+                if right_val == 0 {
+                    *error_flag = 1;
+                    0
+                } else {
+                    left_val / right_val
+                }
+            },
+            _ => {
+                *error_flag = 1;
+                0
+            }
+        };
+    }
+
+    // For direct number conversion as in case 9: Direct number (e.g., "42") - No dependency
+    if let Ok(num) = formula.trim().parse::<i32>() {
+        return num;
+    }
+
+    // Check if it's a simple cell reference (e.g., "A1")
+    let mut col = String::new();
+    let mut row = 0;
+    let mut found_letter = false;
+
+    for c in formula.chars() {
+        if c.is_ascii_alphabetic() {
+            col.push(c);
+            found_letter = true;
+        } else if c.is_digit(10) && found_letter {
+            let digit = c.to_digit(10).unwrap() as i32;
+            row = row * 10 + digit;
+        }
+    }
+
+    if !col.is_empty() && row > 0 {
+        let col_index = get_col_index(&col);
+        if col_index < 0 || col_index >= C || row < 1 || row > R {
+            *error_flag = 1;
+            return 0;
+        }
+
+        if sheet[(row - 1) as usize][col_index as usize].err != 0 {
+            *error_flag = 1;
+            return 0;
+        }
+
+        return sheet[(row - 1) as usize][col_index as usize].val;
+    }
+
+    // If we get here, it's not a valid formula
+    *error_flag = 1;
+    0
+}
+
+fn build_dependency_graph(R: i32, C: i32, sheet: &Vec<Vec<cell>>, graph: &mut Vec<Option<Box<DAGNode>>>) {
+    let total_cells = (R * C) as usize;
+    for i in 0..total_cells {
+        if graph[i].is_none() {
+            graph[i] = Some(Box::new(DAGNode {
+                in_degree: 0,
+                dependents: None,
+            }));
+        }
+    }
+    // Parse formulas to populate graph
+    for i in 0..R {
+        for j in 0..C {
+            if let Some(ref form) = sheet[i as usize][j as usize].formula {
+                let mut col1 = String::new();
+                let mut col2 = String::new();
+                let mut op = ' ';
+                let mut function = String::new();
+                let mut row1: i32 = 0;
+                let mut row2: i32 = 0;
+                let mut num1: i32 = 0;
+                let mut num2: i32 = 0;
+                let f = form.as_str();
+                // Case 1: Cell operation Cell (A1 + B2)
+                if {
+                    let mut chars = f.split_whitespace();
+                    let part1 = chars.next().unwrap_or("");
+                    let op_str = chars.next().unwrap_or("");
+                    let part2 = chars.next().unwrap_or("");
+                    if part1.len() > 0 && part2.len() > 0 && op_str.len() == 1 {
+                        // Try to split part1 into letters and digits
+                        let mut letters = String::new();
+                        let mut digits = String::new();
+                        for c in part1.chars() {
+                            if c.is_ascii_alphabetic() {
+                                letters.push(c);
+                            } else if c.is_digit(10) {
+                                digits.push(c);
+                            }
+                        }
+                        if let Ok(r) = digits.parse::<i32>() {
+                            row1 = r;
+                        }
+                        col1 = letters;
+                        op = op_str.chars().next().unwrap();
+                        let mut letters2 = String::new();
+                        let mut digits2 = String::new();
+                        for c in part2.chars() {
+                            if c.is_ascii_alphabetic() {
+                                letters2.push(c);
+                            } else if c.is_digit(10) {
+                                digits2.push(c);
+                            }
+                        }
+                        if let Ok(r2) = digits2.parse::<i32>() {
+                            row2 = r2;
+                        }
+                        col2 = letters2;
+                        col1.len() > 0 && col2.len() > 0 && row1 > 0 && row2 > 0 && row1 <= R && row2 <= R
+                    } else {
+                        false
+                    }
+                } {
+                    let c1 = get_col_index(&col1);
+                    let c2 = get_col_index(&col2);
+                    if c1 >= 0 && c2 >= 0 && row1 > 0 && row2 > 0 && row1 <= R && row2 <= R {
+                        add_dependency(graph, i, j, row1 - 1, c1, R, C);
+                        add_dependency(graph, i, j, row2 - 1, c2, R, C);
+                    }
+                }
+                // Case 2: Integer operation Cell (5 + A1)
+                else if {
+                    let mut parts = f.split_whitespace();
+                    if let Some(n1) = parts.next() {
+                        if let Ok(n) = n1.parse::<i32>() {
+                            num1 = n;
+                        } else {
+                            ()
+                        }
+                    }
+                    let op_part = parts.next().unwrap_or("");
+                    if op_part.len() == 1 {
+                        op = op_part.chars().next().unwrap();
+                    }
+                    let part = parts.next().unwrap_or("");
+                    let mut letters = String::new();
+                    let mut digits = String::new();
+                    for c in part.chars() {
+                        if c.is_ascii_alphabetic() {
+                            letters.push(c);
+                        } else if c.is_digit(10) {
+                            digits.push(c);
+                        }
+                    }
+                    if let Ok(r) = digits.parse::<i32>() {
+                        row1 = r;
+                    }
+                    col1 = letters;
+                    col1.len() > 0 && row1 > 0 && row1 <= R
+                } {
+                    let c1 = get_col_index(&col1);
+                    if c1 >= 0 && row1 > 0 && row1 <= R {
+                        add_dependency(graph, i, j, row1 - 1, c1, R, C);
+                    }
+                }
+                // Case 3: Cell operation Integer (A1 + 5)
+                else if {
+                    let mut parts = f.split_whitespace();
+                    let part = parts.next().unwrap_or("");
+                    let mut letters = String::new();
+                    let mut digits = String::new();
+                    for c in part.chars() {
+                        if c.is_ascii_alphabetic() {
+                            letters.push(c);
+                        } else if c.is_digit(10) {
+                            digits.push(c);
+                        }
+                    }
+                    if let Ok(r) = digits.parse::<i32>() {
+                        row1 = r;
+                    }
+                    col1 = letters;
+                    let op_part = parts.next().unwrap_or("");
+                    if op_part.len() == 1 {
+                        op = op_part.chars().next().unwrap();
+                    }
+                    if let Some(n) = parts.next() {
+                        if let Ok(n_val) = n.parse::<i32>() {
+                            num2 = n_val;
+                        }
+                    }
+                    col1.len() > 0 && row1 > 0 && row1 <= R
+                } {
+                    let c1 = get_col_index(&col1);
+                    if c1 >= 0 && row1 > 0 && row1 <= R {
+                        add_dependency(graph, i, j, row1 - 1, c1, R, C);
+                    }
+                }
+                // Case 4: Integer operation Integer (5 + 3) - No dependency
+                else if {
+                    let mut parts = f.split_whitespace();
+                    if let Ok(n) = parts.next().unwrap_or("").trim().parse::<i32>() {
+                        num1 = n;
+                    }
+                    let op_part = parts.next().unwrap_or("");
+                    if op_part.len() == 1 {
+                        op = op_part.chars().next().unwrap();
+                    }
+                    if let Ok(n2) = parts.next().unwrap_or("").trim().parse::<i32>() {
+                        num2 = n2;
+                    }
+                    true
+                } {
+                    // No dependencies; direct computation
+                }
+                // Case 5: Only a single cell reference (A1)
+                else if {
+                    let mut letters = String::new();
+                    let mut digits = String::new();
+                    for c in f.chars() {
+                        if c.is_ascii_alphabetic() {
+                            letters.push(c);
+                        } else if c.is_digit(10) {
+                            digits.push(c);
+                        }
+                    }
+                    if let Ok(r) = digits.parse::<i32>() {
+                        row1 = r;
+                    }
+                    col1 = letters;
+                    col1.len() > 0 && row1 > 0 && row1 <= R
+                } {
+                    let c1 = get_col_index(&col1);
+                    if c1 >= 0 && row1 > 0 && row1 <= R {
+                        add_dependency(graph, i, j, row1 - 1, c1, R, C);
+                    }
+                }
+                // Case 6: MIN(A1:B3), MAX(A1:B3), etc.
+                else if {
+                    let open_paren = f.find('(');
+                    let colon = f.find(':');
+                    let close_paren = f.find(')');
+                    if open_paren.is_some() && colon.is_some() && close_paren.is_some() {
+                        let func_part = &f[0..open_paren.unwrap()];
+                        function = func_part.to_string();
+                        let mid = &f[open_paren.unwrap()+1..close_paren.unwrap()];
+                        let parts: Vec<&str> = mid.split(':').collect();
+                        if parts.len() == 2 {
+                            let part1 = parts[0];
+                            let part2 = parts[1];
+                            let mut letters1 = String::new();
+                            let mut digits1 = String::new();
+                            for c in part1.chars() {
+                                if c.is_ascii_alphabetic() {
+                                    letters1.push(c);
+                                } else if c.is_digit(10) {
+                                    digits1.push(c);
+                                }
+                            }
+                            if let Ok(r) = digits1.parse::<i32>() {
+                                row1 = r;
+                            }
+                            col1 = letters1;
+                            let mut letters2 = String::new();
+                            let mut digits2 = String::new();
+                            for c in part2.chars() {
+                                if c.is_ascii_alphabetic() {
+                                    letters2.push(c);
+                                } else if c.is_digit(10) {
+                                    digits2.push(c);
+                                }
+                            }
+                            if let Ok(r) = digits2.parse::<i32>() {
+                                row2 = r;
+                            }
+                            col2 = letters2;
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                } {
+                    let c1 = get_col_index(&col1);
+                    let c2 = get_col_index(&col2);
+                    if c1 > c2 || row1 > row2 {
+                        unsafe { inval_r = true; }
+                        return;
+                    }
+                    if c1 >= 0 && c2 >= 0 && row1 > 0 && row2 > 0 && row1 <= R && row2 <= R {
+                        for r in (row1 - 1)..(row2) {
+                            for c in c1..=c2 {
+                                add_dependency(graph, i, j, r, c, R, C);
+                            }
+                        }
+                    }
+                }
+                // Case 7: SLEEP(value) - No dependency
+                else if {
+                    if f.starts_with("SLEEP(") {
+                        let inner = &f[6..f.len()-1];
+                        if inner.trim().parse::<i32>().is_ok() {
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                } {
+                    // No dependencies; only execution delay
+                }
+                // Case 8: SLEEP(B1) - Depends on B1
+                else if {
+                    if f.starts_with("SLEEP(") {
+                        let inner = &f[6..f.len()-1];
+                        let mut letters = String::new();
+                        let mut digits = String::new();
+                        for c in inner.chars() {
+                            if c.is_ascii_alphabetic() {
+                                letters.push(c);
+                            } else if c.is_digit(10) {
+                                digits.push(c);
+                            }
+                        }
+                        if let Ok(r) = digits.parse::<i32>() {
+                            row1 = r;
+                        }
+                        col1 = letters;
+                        col1.len() > 0
+                    } else {
+                        false
+                    }
+                } {
+                    let c1 = get_col_index(&col1);
+                    if c1 >= 0 && row1 > 0 && row1 <= R {
+                        add_dependency(graph, i, j, row1 - 1, c1, R, C);
+                    }
+                }
+                // Case 9: Direct number (e.g., "42") - No dependency
+                else if {
+                    if f.trim().parse::<i32>().is_ok() {
+                        true
+                    } else {
+                        false
+                    }
+                } {
+                    // No dependencies; direct computation
+                } else {
+                    println!("Warning: Invalid formula in cell [{}, {}]: {}", i, j, f);
+                }
+            }
+        }
+    }
+}
+
+fn topological_evaluation(R: i32, C: i32, sheet: &mut Vec<Vec<cell>>, graph: &mut Vec<Option<Box<DAGNode>>>) {
+    let total_cells = (R * C) as usize;
+    // Kahn’s Algorithm for Topological Sorting
+    let mut queue: Vec<CellRef> = Vec::with_capacity(total_cells);
+    // Enqueue independent cells
+    for i in 0..R {
+        for j in 0..C {
+            let idx = (i * C + j) as usize;
+            if let Some(ref dag) = graph[idx] {
+                if dag.in_degree == 0 {
+                    queue.push(CellRef { row: i, col: j });
+                }
+            }
+        }
+    }
+    let mut front = 0;
+    while front < queue.len() {
+        let cell_ref = queue[front];
+        front += 1;
+        let i = cell_ref.row;
+        let j = cell_ref.col;
+        if let Some(ref form) = sheet[i as usize][j as usize].formula {
+            let mut error_flag = 0;
+            let val = evaluate_formula(form, R, C, sheet, &mut error_flag);
+            sheet[i as usize][j as usize].val = val;
+            sheet[i as usize][j as usize].err = error_flag;
+        }
+        let idx = (i * C + j) as usize;
+        if let Some(ref mut dag) = graph[idx] {
+            let mut curr = dag.dependents.take();
+            while let Some(mut node_box) = curr {
+                let r = node_box.cell.row;
+                let c = node_box.cell.col;
+                let dep_idx = (r * C + c) as usize;
+                if let Some(ref mut dep_dag) = graph[dep_idx] {
+                    dep_dag.in_degree -= 1;
+                    if dep_dag.in_degree == 0 {
+                        queue.push(CellRef { row: r, col: c });
+                    }
+                }
+                curr = node_box.next.take();
+            }
+        }
+    }
+}
+
+fn dfs(graph: &Vec<Option<Box<DAGNode>>>, R: i32, C: i32, curr: usize, target: usize, visited: &mut Vec<bool>) -> bool {
+    let total = (R * C) as usize;
+
+    // Check if current index is valid
+    if curr >= total {
+        return false;
+    }
+
+    if curr == target {
+        return true;
+    }
+
+    visited[curr] = true;
+
+    if let Some(ref dag) = graph[curr] {
+        let mut node_opt = dag.dependents.as_ref();
+        while let Some(node) = node_opt {
+            let next_row = node.cell.row;
+            let next_col = node.cell.col;
+
+            // Validate row and column before calculating index
+            if next_row >= 0 && next_row < R && next_col >= 0 && next_col < C {
+                let next = (next_row * C + next_col) as usize;
+
+                // Double-check index is in bounds
+                if next < total && !visited[next] && dfs(graph, R, C, next, target, visited) {
+                    return true;
+                }
+            }
+
+            node_opt = node.next.as_ref().map(|b| b as &Box<Node>);
+        }
+    }
+
+    false
+}
+
+fn is_reachable(graph: &Vec<Option<Box<DAGNode>>>, R: i32, C: i32, src: usize, target: usize) -> bool {
+    let total = (R * C) as usize;
+
+    // Check if indices are valid
+    if src >= total || target >= total {
+        return false;
+    }
+
+    let mut visited = vec![false; total];
+    let result = dfs(graph, R, C, src, target, &mut visited);
+    result
+}
+
+// Updated add_dependency that checks for cycles before adding an edge.
+// dep_row/dep_col: the cell that depends on the reference cell (i.e. contains the formula)
+// ref_row/ref_col: the cell that is referenced (and hence must be computed first)
+fn add_dependency(graph: &mut Vec<Option<Box<DAGNode>>>, dep_row: i32, dep_col: i32, ref_row: i32, ref_col: i32, R: i32, C: i32) {
+    // Validate all indices are in bounds
+    if dep_row < 0 || dep_row >= R || dep_col < 0 || dep_col >= C ||
+        ref_row < 0 || ref_row >= R || ref_col < 0 || ref_col >= C {
+            return;  // Skip invalid indices
+    }
+
+    let dependent_index = (dep_row * C + dep_col) as usize;
+    let reference_index = (ref_row * C + ref_col) as usize;
+
+    let total_cells = (R * C) as usize;
+    if dependent_index >= total_cells || reference_index >= total_cells {
+        return;  // Skip if indices are out of bounds
+    }
+
+    if is_reachable(graph, R, C, dependent_index, reference_index) {
+        unsafe { cycle_detected = true; }
+        return;  // Ignore this dependency addition
+    }
+
+    // Create a new node for the dependency edge.
+    let new_node = Box::new(Node {
+        cell: CellRef { row: dep_row, col: dep_col },
+        next: None,
+    });
+
+    // Insert the new node at the beginning of the reference cell's dependent list.
+    if let Some(ref mut dag) = graph[reference_index] {
+        let prev = dag.dependents.take();
+        let mut node_to_insert = new_node;
+        node_to_insert.next = prev;
+        dag.dependents = Some(node_to_insert);
+    }
+
+    // Increase the in-degree of the dependent cell.
+    if let Some(ref mut dag) = graph[dependent_index] {
+        dag.in_degree += 1;
+    }
+}
+
+static mut cycle_detected: bool = false;
+
+fn check_invalid_range(formula: &str) -> i32 {
+    let mut function = String::new();
+    let mut col1 = String::new();
+    let mut col2 = String::new();
+    let mut row1: i32 = 0;
+    let mut row2: i32 = 0;
+    // Check for range functions (MIN, MAX, AVG, SUM, STDEV)
+    if formula.contains("(") && formula.contains(":") && formula.contains(")") {
+        let open_paren = formula.find('(').unwrap();
+        function = formula[0..open_paren].to_string();
+        let close_paren = formula.find(')').unwrap();
+        let inner = &formula[open_paren+1..close_paren];
+        let parts: Vec<&str> = inner.split(':').collect();
+        if parts.len() == 2 {
+            let part1 = parts[0];
+            let part2 = parts[1];
+            for c in part1.chars() {
+                if c.is_ascii_alphabetic() {
+                    col1.push(c);
+                }
+            }
+            for c in part1.chars() {
+                if c.is_digit(10) {
+                    // collect digits for row1
+                    if let Some(d) = c.to_digit(10) {
+                        row1 = row1 * 10 + d as i32;
+                    }
+                }
+            }
+            for c in part2.chars() {
+                if c.is_ascii_alphabetic() {
+                    col2.push(c);
+                }
+            }
+            for c in part2.chars() {
+                if c.is_digit(10) {
+                    if let Some(d) = c.to_digit(10) {
+                        row2 = row2 * 10 + d as i32;
+                    }
+                }
+            }
+            let c1 = get_col_index(&col1);
+            let c2 = get_col_index(&col2);
+            // Check if range is invalid (C1 > C2 or R1 > R2)
+            if c1 > c2 || row1 > row2 {
+                return 1; // Invalid range
+            }
+        }
+    }
+    0 // Valid range or not a range formula
+}
+
+fn evaluate_range(range: &str, R: i32, C: i32, sheet: &Vec<Vec<cell>>, func: &str) -> i32 {
+    let mut start_row = 0;
+    let mut end_row = 0;
+    let mut start_col = 0;
+    let mut end_col = 0;
+
+    if parse_range(range, &mut start_row, &mut end_row, &mut start_col, &mut end_col) != 0 {
+        unsafe { inval_r = true; }
+        return 0; // Error in range
+    }
+
+    let total_cells = (end_row - start_row + 1) * (end_col - start_col + 1);
+    let mut values: Vec<i32> = Vec::with_capacity(total_cells as usize);
+
+    // Iterate over the range and check for error cells
+    for i in start_row..=end_row {
+        for j in start_col..=end_col {
+            if sheet[i as usize][j as usize].err != 0 {
+                // If any cell is already in error, indicate error for the range
+                unsafe { inval_r = true; }
+                return 0;
+            }
+            values.push(sheet[i as usize][j as usize].val);
+        }
+    }
+
+    let count = values.len();
+    let mut result = 0;
+
+    if func == "SUM" {
+        for val in &values {
+            result += val;
+        }
+    } else if func == "AVG" {
+        if count > 0 {
+            for val in &values {
+                result += val;
+            }
+            result /= count as i32;
+        }
+    } else if func == "MIN" {
+        if count > 0 {
+            result = std::i32::MAX;
+            for val in &values {
+                if *val < result {
+                    result = *val;
+                }
+            }
+        }
+    } else if func == "MAX" {
+        if count > 0 {
+            result = std::i32::MIN;
+            for val in &values {
+                if *val > result {
+                    result = *val;
+                }
+            }
+        }
+    } else if func == "STDEV" {
+        result = stdev(&values);
+    }
+
+    result
+}
+
+fn parse_range(range: &str, start_row: &mut i32, end_row: &mut i32, start_col: &mut i32, end_col: &mut i32) -> i32 {
+    let mut col1 = String::new();
+    let mut col2 = String::new();
+    let mut row1: i32 = 0;
+    let mut row2: i32 = 0;
+
+    // Check if it's a range (A1:B2 format)
+    if let Some(colon_pos) = range.find(':') {
+        let (first_part, second_part) = range.split_at(colon_pos);
+        let second_part = &second_part[1..]; // Skip the colon
+
+        // Parse first part (A1)
+        for c in first_part.chars() {
+            if c.is_ascii_alphabetic() {
+                col1.push(c);
+            } else if c.is_digit(10) {
+                let digit = c.to_digit(10).unwrap() as i32;
+                row1 = row1 * 10 + digit;
+            }
+        }
+
+        // Parse second part (B2)
+        for c in second_part.chars() {
+            if c.is_ascii_alphabetic() {
+                col2.push(c);
+            } else if c.is_digit(10) {
+                let digit = c.to_digit(10).unwrap() as i32;
+                row2 = row2 * 10 + digit;
+            }
+        }
+
+        *start_row = row1 - 1;
+        *end_row = row2 - 1;
+        *start_col = get_col_index(&col1);
+        *end_col = get_col_index(&col2);
+
+        if *start_row > *end_row || *start_col > *end_col {
+            unsafe { inval_r = true; }
+            return -1; // Invalid range
+        }
+    } else {
+        // Single cell reference (A1 format)
+        for c in range.chars() {
+            if c.is_ascii_alphabetic() {
+                col1.push(c);
+            } else if c.is_digit(10) {
+                let digit = c.to_digit(10).unwrap() as i32;
+                row1 = row1 * 10 + digit;
+            }
+        }
+
+        if col1.is_empty() || row1 == 0 {
+            unsafe { inval_r = true; }
+            return -1; // Invalid range
+        }
+
+        *start_row = row1 - 1;
+        *end_row = row1 - 1;
+        *start_col = get_col_index(&col1);
+        *end_col = get_col_index(&col1);
+    }
+
+    0 // Success
+}
+
+fn stdev(values: &Vec<i32>) -> i32 {
+    let count = values.len();
+    if count <= 1 {  // Need at least 2 values for standard deviation
+        return 0;
+    }
+
+    // Calculate mean
+    let mut mean = 0.0;
+    for val in values {
+        mean += *val as f64;
+    }
+    mean /= count as f64;
+
+    // Calculate sum of squared differences from mean
+    let mut sum_squared_diff = 0.0;
+    for val in values {
+        let diff = *val as f64 - mean;
+        sum_squared_diff += diff * diff;
+    }
+
+    // Calculate standard deviation
+    // Using population standard deviation formula: sqrt(Σ(x - μ)²/n)
+    let stdev = (sum_squared_diff / count as f64).sqrt();
+
+    // Round to nearest integer
+    (stdev + 0.5) as i32
+}
+
+fn get_value_from_formula(formula: &str, R: i32, C: i32, sheet: &Vec<Vec<cell>>, error_flag: &mut i32) -> i32 {
+    let mut col = String::new();
+    let mut row = 0;
+
+    // Parse cell reference (e.g., "A1")
+    let mut found_letter = false;
+    for c in formula.chars() {
+        if c.is_ascii_alphabetic() {
+            col.push(c);
+            found_letter = true;
+        } else if c.is_digit(10) && found_letter {
+            let digit = c.to_digit(10).unwrap() as i32;
+            row = row * 10 + digit;
+        }
+    }
+
+    if !col.is_empty() && row > 0 {
+        let col_index = get_col_index(&col);
+        if col_index < 0 || col_index >= C || row < 1 || row > R {
+            *error_flag = 1;
+            return 0;
+        }
+
+        if sheet[(row - 1) as usize][col_index as usize].err != 0 {
+            *error_flag = 1;
+            return 0;
+        }
+
+        return sheet[(row - 1) as usize][col_index as usize].val;
+    }
+
+    // Try to parse as a direct number
+    if let Ok(value) = formula.trim().parse::<i32>() {
+        return value;
+    }
+
+    // If we get here, it's not a valid formula
+    *error_flag = 1;
+    0
+}
+
+fn main() {
+    let args: Vec<String> = env::args().collect();
+    if args.len() != 3 {
+        println!("Usage: ./sheet R C");
+        process::exit(1);
+    }
+    let R: i32 = args[1].parse().unwrap_or(0);
+    let C: i32 = args[2].parse().unwrap_or(0);
+    if R < 1 || R > 999 || C < 1 || C > (26 * 26 * 26 + 26 * 26 + 26) {
+        println!("Invalid grid size.");
+        process::exit(1);
+    }
+    // Allocate sheet as a contiguous 2D vector.
+    let mut sheet: Vec<Vec<cell>> = Vec::with_capacity(R as usize);
+    for _ in 0..R {
+        let mut row_vec: Vec<cell> = Vec::with_capacity(C as usize);
+        for _ in 0..C {
+            row_vec.push(cell {
+                val: 0,
+                formula: None,
+                err: 0,
+            });
+        }
+        sheet.push(row_vec);
+    }
+    let mut row_offset: i32 = 0;
+    let mut col_offset: i32 = 0;
+    let mut output_enabled: i32 = 1;
+    print_sheet(R, C, &sheet, row_offset, col_offset, output_enabled);
+    let stdin = io::stdin();
+    let mut input_line = String::new();
+    print!("[0.0] (ok) > ");
+    io::stdout().flush().unwrap();
+    while let Ok(n) = stdin.lock().read_line(&mut input_line) {
+        if n == 0 {
+            break;
+        }
+        if let Some(pos) = input_line.find('\n') {
+            input_line.replace_range(pos..pos+1, "");
+        }
+        unsafe {
+            sleeptimetotal = 0.0;
+            inval_r = false;
+            unrec_cmd = false;
+            cycle_detected = false;
+            last_update.is_updated = false;
+        }
+        // ----- Backup update command info if applicable -----
+        // If the command is of the form "A1=..." then store a backup of the cell's old formula.
+        let mut updatedRow: i32 = -1;
+        let mut updatedCol: i32 = -1;
+        let mut backupFormula = String::new();  // Adjust size as needed.
+        {
+            let mut colStr = String::new();
+            let mut newFormula = String::new();
+            let mut row: i32 = 0;
+            // Parse command of form "A1=..."
+            let mut chars = input_line.chars();
+            while let Some(c) = chars.clone().next() {
+                if c.is_ascii_alphabetic() {
+                    colStr.push(c);
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            let rest: String = chars.collect();
+            let parts: Vec<&str> = rest.split('=').collect();
+            if parts.len() == 2 {
+                let row_part = parts[0].trim();
+                newFormula = parts[1].trim().to_string();
+                if let Ok(r) = row_part.parse::<i32>() {
+                    row = r;
+                }
+            }
+            updatedCol = get_col_index(&colStr);
+            updatedRow = row - 1;
+            if updatedCol >= 0 && updatedCol < C && row >= 1 && row <= R {
+                if let Some(ref s) = sheet[updatedRow as usize][updatedCol as usize].formula {
+                    backupFormula = s.clone(); // Copy the old formula (if any) into backupFormula.
+                }
+            }
+        }
+        let start = Instant::now();
+        // Process the user input (this may update a cell’s formula, adjust scrolling, etc.)
+        process_input(&input_line, R, C, &mut sheet, &mut row_offset, &mut col_offset, &mut output_enabled);
+        // Build a temporary dependency graph to check for cycles.
+        let total_cells = (R * C) as usize;
+        let mut graph: Vec<Option<Box<DAGNode>>> = Vec::with_capacity(total_cells);
+        for _ in 0..total_cells {
+            graph.push(Some(Box::new(DAGNode {
+                in_degree: 0,
+                dependents: None,
+            })));
+        }
+        build_dependency_graph(R, C, &sheet, &mut graph);
+        unsafe {
+            if cycle_detected && updatedRow != -1 && updatedCol != -1 {
+                // Cycle detected - update rejected.
+                sheet[updatedRow as usize][updatedCol as usize].formula = None;
+                if backupFormula.len() > 0 {
+                    sheet[updatedRow as usize][updatedCol as usize].formula = Some(backupFormula.clone());
+                } else {
+                    sheet[updatedRow as usize][updatedCol as usize].formula = None;
+                }
+            } else if !cycle_detected {
+                sleeptimetotal = 0.0;
+                evaluate_sheet(R, C, &mut sheet);
+            }
+        }
+        // Free the temporary dependency graph.
+        for i in 0..total_cells {
+            if let Some(mut node) = graph[i].take() {
+                while let Some(mut dep) = node.dependents.take() {
+                    node.dependents = dep.next.take();
+                }
+            }
+        }
+        if output_enabled != 0 {
+            print_sheet(R, C, &sheet, row_offset, col_offset, output_enabled);
+        }
+        let end = Instant::now();
+        {
+            let mut colStr = String::new();
+            let mut dummyFormula = String::new();
+            let mut row: i32 = 0;
+            // Check for invalid range update command
+            let mut chars = input_line.chars();
+            while let Some(c) = chars.clone().next() {
+                if c.is_ascii_alphabetic() {
+                    colStr.push(c);
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            let rest: String = chars.collect();
+            let parts: Vec<&str> = rest.split('=').collect();
+            if parts.len() == 2 {
+                let row_part = parts[0].trim();
+                dummyFormula = parts[1].trim().to_string();
+                if let Ok(r) = row_part.parse::<i32>() {
+                    row = r;
+                }
+            }
+            if unsafe { inval_r } && !colStr.is_empty() && row != 0 {
+                let updatedCol = get_col_index(&colStr);
+                if updatedCol >= 0 && updatedCol < C && row >= 1 && row <= R {
+                    sheet[(row - 1) as usize][updatedCol as usize].formula = None;
+                }
+            }
+        }
+        unsafe {
+            let sleep_time = sleeptimetotal;  // Copy the value to a local variable
+            sleeptimetotal = 0.0;  // Reset immediately
+            print!("[{:.2}]", sleep_time);  // Reset after printing
+            if unrec_cmd {
+                print!(" (unrecognized cmd) > ");
+            } else if inval_r {
+                print!(" (Invalid range) > ");
+            } else if cycle_detected {
+                print!(" (Cycle Detected, change cmd) > ");
+            } else {
+                print!(" (ok) > ");
+            }
+        }
+        io::stdout().flush().unwrap();
+        input_line.clear();
+    }
+}
+
+
+fn clock() -> i64 {
+    unsafe { libc::time(std::ptr::null_mut()) as i64 }
+}
+// End of code
