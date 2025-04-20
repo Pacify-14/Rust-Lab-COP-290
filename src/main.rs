@@ -1,3 +1,5 @@
+#![allow(warnings)]
+use std::env;
 use regex::Regex;
 use std::io::{self, BufRead, Write};
 use std::process;
@@ -106,9 +108,7 @@ fn print_columns(c: i32, col_offset: i32) {
             col[index] = (b'A' + (temp % 26) as u8) as char;
             index -= 1;
             temp = (temp / 26) - 1;
-            if index < 0 {
-                break;
-            }
+            
         }
         // Print starting from col[index+1]
         let s: String = col[(index + 1) as usize..4].iter().collect();
@@ -1258,7 +1258,7 @@ fn main() {
     let vim_mode = matches.get_flag("vim");
 
     // Get rows and columns from either named or positional arguments
-    let rows = if let Some(r) = matches.get_one::<String>("rows") {
+    let R = if let Some(r) = matches.get_one::<String>("rows") {
         r.parse::<i32>().unwrap_or(20)
     } else if let Some(r) = matches.get_one::<String>("R") {
         r.parse::<i32>().unwrap_or(20)
@@ -1266,7 +1266,7 @@ fn main() {
         20 // Default
     };
 
-    let cols = if let Some(c) = matches.get_one::<String>("cols") {
+    let C = if let Some(c) = matches.get_one::<String>("cols") {
         c.parse::<i32>().unwrap_or(20)
     } else if let Some(c) = matches.get_one::<String>("C") {
         c.parse::<i32>().unwrap_or(20)
@@ -1275,23 +1275,34 @@ fn main() {
     };
 
     // Validate dimensions
-    if rows < 1 || rows > 100000 || cols < 1 || cols > (26 * 26 * 26 + 26 * 26 + 26) {
+    if R < 1 || R > 100000 || C < 1 || C > (26 * 26 * 26 + 26 * 26 + 26) {
         println!("Invalid grid size.");
         process::exit(1);
     }
 
     // If vim mode is enabled, run the vim interface
     if vim_mode {
-        vim_mode::editor::run_vim_interface(rows, cols);
+        vim_mode::editor::run_vim_interface(R, C);
         return;
     }
 
     // Original code path for standard mode
+    let args: Vec<String> = env::args().collect();
+    if args.len() != 3 {
+        println!("Usage: ./sheet R C");
+        process::exit(1);
+    }
+    let R: i32 = args[1].parse().unwrap_or(0);
+    let C: i32 = args[2].parse().unwrap_or(0);
+    if R < 1 || R > 999 || C < 1 || C > (26 * 26 * 26 + 26 * 26 + 26) {
+        println!("Invalid grid size.");
+        process::exit(1);
+    }
     // Allocate sheet as a contiguous 2D vector.
-    let mut sheet: Vec<Vec<cell>> = Vec::with_capacity(rows as usize);
-    for _ in 0..rows {
-        let mut row_vec: Vec<cell> = Vec::with_capacity(cols as usize);
-        for _ in 0..cols {
+    let mut sheet: Vec<Vec<cell>> = Vec::with_capacity(R as usize);
+    for _ in 0..R {
+        let mut row_vec: Vec<cell> = Vec::with_capacity(C as usize);
+        for _ in 0..C {
             row_vec.push(cell {
                 val: 0,
                 formula: None,
@@ -1300,27 +1311,21 @@ fn main() {
         }
         sheet.push(row_vec);
     }
-
     let mut row_offset: i32 = 0;
     let mut col_offset: i32 = 0;
     let mut output_enabled: i32 = 1;
-
-    print_sheet(rows, cols, &sheet, row_offset, col_offset, output_enabled);
-
+    print_sheet(R, C, &sheet, row_offset, col_offset, output_enabled);
     let stdin = io::stdin();
     let mut input_line = String::new();
     print!("[0.0] (ok) > ");
     io::stdout().flush().unwrap();
-
     while let Ok(n) = stdin.lock().read_line(&mut input_line) {
         if n == 0 {
             break;
         }
-
         if let Some(pos) = input_line.find('\n') {
-            input_line.replace_range(pos..pos + 1, "");
+            input_line.replace_range(pos..pos+1, "");
         }
-
         unsafe {
             SLEEPTIMETOTAL = 0.0;
             INVAL_R = false;
@@ -1328,90 +1333,69 @@ fn main() {
             CYCLE_DETECTED = false;
             LAST_UPDATE.is_updated = false;
         }
-
         // ----- Backup update command info if applicable -----
         // If the command is of the form "A1=..." then store a backup of the cell's old formula.
-        let mut updated_row: i32 = -1;
-        let mut updated_col: i32 = -1;
-        let mut backup_formula = String::new(); // Adjust size as needed.
-
+        let mut updatedRow: i32 = -1;
+        let mut updatedCol: i32 = -1;
+        let mut backupFormula = String::new();  // Adjust size as needed.
         {
-            let mut col_str = String::new();
-            let mut new_formula = String::new();
+            let mut colStr = String::new();
+            let mut newFormula = String::new();
             let mut row: i32 = 0;
             // Parse command of form "A1=..."
             let mut chars = input_line.chars();
             while let Some(c) = chars.clone().next() {
                 if c.is_ascii_alphabetic() {
-                    col_str.push(c);
+                    colStr.push(c);
                     chars.next();
                 } else {
                     break;
                 }
             }
-
             let rest: String = chars.collect();
             let parts: Vec<&str> = rest.split('=').collect();
             if parts.len() == 2 {
                 let row_part = parts[0].trim();
-                new_formula = parts[1].trim().to_string();
+                newFormula = parts[1].trim().to_string();
                 if let Ok(r) = row_part.parse::<i32>() {
                     row = r;
                 }
             }
-
-            updated_col = get_col_index(&col_str);
-            updated_row = row - 1;
-
-            if updated_col >= 0 && updated_col < cols && row >= 1 && row <= rows {
-                if let Some(ref s) = sheet[updated_row as usize][updated_col as usize].formula {
-                    backup_formula = s.clone(); // Copy the old formula (if any) into backup_formula.
+            updatedCol = get_col_index(&colStr);
+            updatedRow = row - 1;
+            if updatedCol >= 0 && updatedCol < C && row >= 1 && row <= R {
+                if let Some(ref s) = sheet[updatedRow as usize][updatedCol as usize].formula {
+                    backupFormula = s.clone(); // Copy the old formula (if any) into backupFormula.
                 }
             }
         }
-
         let start = Instant::now();
-
         // Process the user input (this may update a cell's formula, adjust scrolling, etc.)
-        process_input(
-            &input_line,
-            rows,
-            cols,
-            &mut sheet,
-            &mut row_offset,
-            &mut col_offset,
-            &mut output_enabled,
-        );
-
+        process_input(&input_line, R, C, &mut sheet, &mut row_offset, &mut col_offset, &mut output_enabled);
         // Build a temporary dependency graph to check for cycles.
-        let total_cells = (rows * cols) as usize;
+        let total_cells = (R * C) as usize;
         let mut graph: Vec<Option<Box<DAGNode>>> = Vec::with_capacity(total_cells);
-
         for _ in 0..total_cells {
             graph.push(Some(Box::new(DAGNode {
                 in_degree: 0,
                 dependents: None,
             })));
         }
-
-        build_dependency_graph(rows, cols, &sheet, &mut graph);
-
+        build_dependency_graph(R, C, &sheet, &mut graph);
         unsafe {
-            if CYCLE_DETECTED && updated_row != -1 && updated_col != -1 {
+            if CYCLE_DETECTED && updatedRow != -1 && updatedCol != -1 {
                 // Cycle detected - update rejected.
-                sheet[updated_row as usize][updated_col as usize].formula = None;
-                if backup_formula.len() > 0 {
-                    sheet[updated_row as usize][updated_col as usize].formula =
-                        Some(backup_formula.clone());
+                sheet[updatedRow as usize][updatedCol as usize].formula = None;
+                if backupFormula.len() > 0 {
+                    sheet[updatedRow as usize][updatedCol as usize].formula = Some(backupFormula.clone());
                 } else {
-                    sheet[updated_row as usize][updated_col as usize].formula = None;
+                    sheet[updatedRow as usize][updatedCol as usize].formula = None;
                 }
             } else if !CYCLE_DETECTED {
                 SLEEPTIMETOTAL = 0.0;
-                evaluate_sheet(rows, cols, &mut sheet);
+                evaluate_sheet(R, C, &mut sheet);
             }
         }
-
         // Free the temporary dependency graph.
         for i in 0..total_cells {
             if let Some(mut node) = graph[i].take() {
@@ -1420,50 +1404,44 @@ fn main() {
                 }
             }
         }
-
         if output_enabled != 0 {
-            print_sheet(rows, cols, &sheet, row_offset, col_offset, output_enabled);
+            print_sheet(R, C, &sheet, row_offset, col_offset, output_enabled);
         }
-
         let end = Instant::now();
-
         {
-            let mut col_str = String::new();
-            let mut dummy_formula = String::new();
+            let mut colStr = String::new();
+            let mut dummyFormula = String::new();
             let mut row: i32 = 0;
             // Check for invalid range update command
             let mut chars = input_line.chars();
             while let Some(c) = chars.clone().next() {
                 if c.is_ascii_alphabetic() {
-                    col_str.push(c);
+                    colStr.push(c);
                     chars.next();
                 } else {
                     break;
                 }
             }
-
             let rest: String = chars.collect();
             let parts: Vec<&str> = rest.split('=').collect();
             if parts.len() == 2 {
                 let row_part = parts[0].trim();
-                dummy_formula = parts[1].trim().to_string();
+                dummyFormula = parts[1].trim().to_string();
                 if let Ok(r) = row_part.parse::<i32>() {
                     row = r;
                 }
             }
-
-            if unsafe { INVAL_R } && !col_str.is_empty() && row != 0 {
-                let updated_col = get_col_index(&col_str);
-                if updated_col >= 0 && updated_col < cols && row >= 1 && row <= rows {
-                    sheet[(row - 1) as usize][updated_col as usize].formula = None;
+            if unsafe { INVAL_R } && !colStr.is_empty() && row != 0 {
+                let updatedCol = get_col_index(&colStr);
+                if updatedCol >= 0 && updatedCol < C && row >= 1 && row <= R {
+                    sheet[(row - 1) as usize][updatedCol as usize].formula = None;
                 }
             }
         }
-
         unsafe {
-            let sleep_time = SLEEPTIMETOTAL; // Copy the value to a local variable
-            SLEEPTIMETOTAL = 0.0; // Reset immediately
-            print!("[{:.2}]", sleep_time); // Reset after printing
+            let sleep_time = SLEEPTIMETOTAL;  // Copy the value to a local variable
+            SLEEPTIMETOTAL = 0.0;  // Reset immediately
+            print!("[{:.2}]", sleep_time);  // Reset after printing
             if UNREC_CMD {
                 print!(" (unrecognized cmd) > ");
             } else if INVAL_R {
@@ -1474,7 +1452,6 @@ fn main() {
                 print!(" (ok) > ");
             }
         }
-
         io::stdout().flush().unwrap();
         input_line.clear();
     }
