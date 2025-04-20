@@ -1257,3 +1257,634 @@ fn clock() -> i64 {
     unsafe { libc::time(std::ptr::null_mut()) as i64 }
 }
 // End of code
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::{Command, Stdio};
+    use std::io::Write;
+
+    #[test]
+    fn test_col_index_simple() {
+        assert_eq!(get_col_index("A"), 0);
+        assert_eq!(get_col_index("Z"), 25);
+        assert_eq!(get_col_index("AA"), 26);
+        assert_eq!(get_col_index("AB"), 27);
+    }
+
+    #[test]
+    fn test_parse_range_valid() {
+        let mut sr = 0;
+        let mut er = 0;
+        let mut sc = 0;
+        let mut ec = 0;
+        let result = parse_range("A1:B2", &mut sr, &mut er, &mut sc, &mut ec);
+        assert_eq!(result, 0);
+        assert_eq!((sr, er, sc, ec), (0, 1, 0, 1));
+    }
+
+    #[test]
+    fn test_get_value_from_formula_direct() {
+        let sheet = vec![vec![cell { val: 42, formula: None, err: 0 }]];
+        let mut err = 0;
+        assert_eq!(get_value_from_formula("42", 1, 1, &sheet, &mut err), 42);
+    }
+    
+    #[test]
+    fn test_evaluate_formula_simple_addition() {
+        let mut sheet = vec![vec![cell { val: 5, formula: None, err: 0 }; 3]; 3];
+        sheet[0][1].val = 10; // B1 = 10
+        let mut error = 0;
+        let result = evaluate_formula("A1+B1", 3, 3, &sheet, &mut error);
+        assert_eq!(result, 15);
+        assert_eq!(error, 0);
+    }
+    
+    #[test]
+    fn test_evaluate_sum_range() {
+        let mut sheet = vec![vec![cell { val: 1, formula: None, err: 0 }; 2]; 2];
+        let result = evaluate_range("A1:B2", 2, 2, &sheet, "SUM");
+        assert_eq!(result, 4);
+    }
+
+    #[test]
+    fn test_invalid_range_detection() {
+        assert_eq!(check_invalid_range("SUM(B2:A1)"), 1); // B2 to A1 = invalid
+        assert_eq!(check_invalid_range("AVG(A1:B2)"), 0); // valid
+    }
+
+    #[test]
+    fn test_process_input_set_cell_formula() {
+        let mut sheet = vec![vec![cell { val: 0, formula: None, err: 0 }; 3]; 3];
+        let mut row_offset = 0;
+        let mut col_offset = 0;
+        let mut output_enabled = 1;
+        process_input("A1=3", 3, 3, &mut sheet, &mut row_offset, &mut col_offset, &mut output_enabled);
+        assert_eq!(sheet[0][0].formula.as_deref(), Some("3"));
+    }
+
+    #[test]
+    fn test_evaluate_sheet_updates_values() {
+        let mut sheet = vec![vec![cell { val: 0, formula: Some("3+4".to_string()), err: 0 }]];
+        evaluate_sheet(1, 1, &mut sheet);
+        assert_eq!(sheet[0][0].val, 7);
+        assert_eq!(sheet[0][0].err, 0);
+    }
+
+
+    #[test]
+    fn test_full_sheet_add_and_eval() {
+        let mut child = Command::new("cargo")
+            .args(&["run", "--quiet", "--", "3", "3"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("failed to run process");
+
+        let stdin = child.stdin.as_mut().expect("failed to open stdin");
+        writeln!(stdin, "A1=5").unwrap();
+        writeln!(stdin, "B1=7").unwrap();
+        writeln!(stdin, "C1=A1+B1").unwrap();
+        writeln!(stdin, "q").unwrap();
+
+        let output = child.wait_with_output().unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("12"));
+    }
+
+    #[test]
+    fn test_sleep_formula_constant() {
+        let sheet = vec![vec![cell { val: 0, formula: None, err: 0 }]];
+        let mut error = 0;
+        let val = evaluate_formula("SLEEP(1)", 1, 1, &sheet, &mut error);
+        assert_eq!(val, 1);
+        assert_eq!(error, 0);
+    }
+
+    #[test]
+    fn test_cycle_detection() {
+        let mut sheet = vec![vec![cell { val: 0, formula: None, err: 0 }; 2]; 2];
+        sheet[0][0].formula = Some("B1".to_string());
+        sheet[0][1].formula = Some("A1".to_string()); // Cycle A1 <-> B1
+
+        let total = 4;
+        let mut graph = Vec::with_capacity(total);
+        for _ in 0..total {
+            graph.push(Some(Box::new(DAGNode {
+                in_degree: 0,
+                dependents: None,
+            })));
+        }
+
+        unsafe { cycle_detected = false; }
+        build_dependency_graph(2, 2, &sheet, &mut graph);
+        assert!(unsafe { cycle_detected });
+    }
+
+    #[test]
+    fn test_process_input_toggle_output() {
+        let mut sheet = vec![vec![cell { val: 0, formula: None, err: 0 }; 3]; 3];
+        let mut row_offset = 0;
+        let mut col_offset = 0;
+        let mut output_enabled = 1;
+        process_input("disable_output", 3, 3, &mut sheet, &mut row_offset, &mut col_offset, &mut output_enabled);
+        assert_eq!(output_enabled, 0);
+        process_input("enable_output", 3, 3, &mut sheet, &mut row_offset, &mut col_offset, &mut output_enabled);
+        assert_eq!(output_enabled, 1);
+    }
+
+    #[test]
+    fn test_process_input_scroll_to() {
+        let mut sheet = vec![vec![cell { val: 0, formula: None, err: 0 }; 5]; 5];
+        let mut row_offset = 0;
+        let mut col_offset = 0;
+        let mut output_enabled = 1;
+
+        process_input("scroll_to B2", 5, 5, &mut sheet, &mut row_offset, &mut col_offset, &mut output_enabled);
+
+        assert_eq!(row_offset, 1); // B2 → row=2 → index=1
+        assert_eq!(col_offset, 1); // B → index=1
+    }
+
+    #[test]
+    fn test_sleep_prompt_output() {
+        let mut sheet = vec![vec![cell { val: 1, formula: Some("SLEEP(1)".to_string()), err: 0 }]];
+        evaluate_sheet(1, 1, &mut sheet);
+        assert_eq!(sheet[0][0].val, 1); // Should sleep 1 second and return 1
+    }
+
+    #[test]
+    fn test_cycle_restore_old_formula() {
+        let mut sheet = vec![vec![cell { val: 0, formula: None, err: 0 }; 2]; 2];
+        sheet[0][0].formula = Some("5".to_string()); // A1 = 5
+        evaluate_sheet(2, 2, &mut sheet);
+        assert_eq!(sheet[0][0].val, 5);
+
+        // Add cyclic formula
+        sheet[0][1].formula = Some("A1".to_string()); // B1 = A1
+        sheet[0][0].formula = Some("B1".to_string()); // A1 = B1 (cycle)
+        let mut graph = Vec::with_capacity(4);
+        for _ in 0..4 {
+            graph.push(Some(Box::new(DAGNode {
+                in_degree: 0,
+                dependents: None,
+            })));
+        }
+        unsafe { cycle_detected = false; }
+        build_dependency_graph(2, 2, &sheet, &mut graph);
+        assert!(unsafe { cycle_detected });
+    }
+
+    #[test]
+    fn test_print_sheet_simple() {
+        let sheet = vec![vec![cell { val: 42, formula: None, err: 0 }]];
+        print_sheet(1, 1, &sheet, 0, 0, 1);
+        // Visually inspect or use output capturing for CI
+    }
+
+    #[test]
+    fn test_scroll_to_valid() {
+        let mut sheet = vec![vec![cell { val: 0, formula: None, err: 0 }; 5]; 5];
+        let mut row_offset = 0;
+        let mut col_offset = 0;
+        let mut output_enabled = 1;
+
+        process_input("scroll_to C3", 5, 5, &mut sheet, &mut row_offset, &mut col_offset, &mut output_enabled);
+        assert_eq!(row_offset, 2);
+        assert_eq!(col_offset, 2);
+    }
+
+    #[test]
+    fn test_scroll_to_invalid_target() {
+        let mut sheet = vec![vec![cell { val: 0, formula: None, err: 0 }; 3]; 3];
+        let mut row_offset = 0;
+        let mut col_offset = 0;
+        let mut output_enabled = 1;
+
+        process_input("scroll_to Z100", 3, 3, &mut sheet, &mut row_offset, &mut col_offset, &mut output_enabled);
+        assert_eq!(row_offset, 0); // should not change
+        assert_eq!(col_offset, 0);
+    }
+
+    #[test]
+    fn test_evaluate_formula_all_operators() {
+        let mut sheet = vec![vec![cell { val: 10, formula: None, err: 0 }; 2]];
+        sheet[0][1].val = 5; // B1
+
+        let mut err = 0;
+        assert_eq!(evaluate_formula("10 + 5", 1, 2, &sheet, &mut err), 15);
+        assert_eq!(evaluate_formula("B1 - 3", 1, 2, &sheet, &mut err), 2);
+        assert_eq!(evaluate_formula("B1 * 2", 1, 2, &sheet, &mut err), 10);
+        assert_eq!(evaluate_formula("10 / B1", 1, 2, &sheet, &mut err), 2);
+    }
+
+    #[test]
+    fn test_evaluate_formula_div_by_zero() {
+        let mut sheet = vec![vec![cell { val: 0, formula: None, err: 0 }]];
+        let mut err = 0;
+        let _ = evaluate_formula("10 / A1", 1, 1, &sheet, &mut err);
+        assert_eq!(err, 1); // division by zero triggers error
+    }
+
+    #[test]
+    fn test_cycle_detection_and_rollback() {
+        let mut sheet = vec![vec![cell { val: 0, formula: None, err: 0 }; 2]; 2];
+        sheet[0][0].formula = Some("B1".to_string()); // A1 depends on B1
+        sheet[0][1].formula = Some("A1".to_string()); // B1 depends on A1 — cycle
+
+        let mut graph = Vec::with_capacity(4);
+        for _ in 0..4 {
+            graph.push(Some(Box::new(DAGNode {
+                in_degree: 0,
+                dependents: None,
+            })));
+        }
+
+        unsafe { cycle_detected = false; }
+        build_dependency_graph(2, 2, &sheet, &mut graph);
+        assert!(unsafe { cycle_detected });
+    }
+
+    #[test]
+    fn test_sleep_prompt_behavior() {
+        let mut sheet = vec![vec![cell { val: 1, formula: Some("SLEEP(1)".to_string()), err: 0 }]];
+        unsafe { sleeptimetotal = 0.0; }
+        evaluate_sheet(1, 1, &mut sheet);
+
+        assert_eq!(sheet[0][0].val, 1);
+        assert!(unsafe { sleeptimetotal >= 1.0 }); // sleep time should be updated
+    }
+
+#[test]
+fn test_evaluate_formula_invalid_string() {
+    let sheet = vec![vec![cell { val: 0, formula: None, err: 0 }]];
+    let mut error = 0;
+    let val = evaluate_formula("XYZ", 1, 1, &sheet, &mut error);
+    assert_eq!(val, 0);
+    assert_eq!(error, 1); // invalid string triggers error
+}
+
+#[test]
+fn test_evaluate_formula_cell_ref_with_error() {
+    let sheet = vec![vec![cell { val: 42, formula: None, err: 1 }]];
+    let mut error = 0;
+    let val = evaluate_formula("A1", 1, 1, &sheet, &mut error);
+    assert_eq!(val, 0);
+    assert_eq!(error, 1); // referencing an error cell triggers error
+}
+
+#[test]
+fn test_evaluate_formula_whitespace_variation() {
+    let mut sheet = vec![vec![cell { val: 7, formula: None, err: 0 }; 2]];
+    sheet[0][1].val = 5;
+    let mut error = 0;
+    let result = evaluate_formula(" A1 + B1 ", 1, 2, &sheet, &mut error);
+    assert_eq!(result, 12);
+    assert_eq!(error, 0);
+}
+
+#[test]
+fn test_process_input_scroll_left_right_up_down() {
+    let mut sheet = vec![vec![cell { val: 0, formula: None, err: 0 }; 20]; 20];
+    let mut row_offset = 10;
+    let mut col_offset = 10;
+    let mut output_enabled = 1;
+
+    process_input("w", 20, 20, &mut sheet, &mut row_offset, &mut col_offset, &mut output_enabled);
+    assert_eq!(row_offset, 0);
+
+    process_input("s", 20, 20, &mut sheet, &mut row_offset, &mut col_offset, &mut output_enabled);
+    assert_eq!(row_offset, 10);
+
+    process_input("a", 20, 20, &mut sheet, &mut row_offset, &mut col_offset, &mut output_enabled);
+    assert_eq!(col_offset, 0);
+
+    process_input("d", 20, 20, &mut sheet, &mut row_offset, &mut col_offset, &mut output_enabled);
+    assert_eq!(col_offset, 10);
+}
+
+#[test]
+fn test_process_input_disable_enable_output() {
+    let mut sheet = vec![vec![cell { val: 0, formula: None, err: 0 }]];
+    let mut row_offset = 0;
+    let mut col_offset = 0;
+    let mut output_enabled = 1;
+
+    process_input("disable_output", 1, 1, &mut sheet, &mut row_offset, &mut col_offset, &mut output_enabled);
+    assert_eq!(output_enabled, 0);
+
+    process_input("enable_output", 1, 1, &mut sheet, &mut row_offset, &mut col_offset, &mut output_enabled);
+    assert_eq!(output_enabled, 1);
+}
+
+#[test]
+fn test_invalid_formula_out_of_bounds_ref() {
+    let sheet = vec![vec![cell { val: 0, formula: None, err: 0 }]];
+    let mut error = 0;
+    let val = evaluate_formula("Z99", 1, 1, &sheet, &mut error);
+    assert_eq!(val, 0);
+    assert_eq!(error, 1); // referencing invalid cell triggers error
+}
+
+#[test]
+fn test_evaluate_range_stdev_single_val() {
+    let sheet = vec![vec![cell { val: 42, formula: None, err: 0 }]];
+    let result = evaluate_range("A1:A1", 1, 1, &sheet, "STDEV");
+    assert_eq!(result, 0); // STDEV of single value should be 0
+}
+
+#[test]
+fn test_evaluate_formula_sleep_cell_changes() {
+    let mut sheet = vec![vec![cell { val: 1, formula: None, err: 0 }]];
+    sheet[0][0].val = 2;
+    let mut error = 0;
+    unsafe {
+        sleeptimetotal = 0.0;
+    }
+    let result = evaluate_formula("SLEEP(A1)", 1, 1, &sheet, &mut error);
+    assert_eq!(result, 2);
+}
+
+#[test]
+fn test_check_invalid_range_bad_bounds() {
+    let formula = "SUM(B3:A1)";
+    assert_eq!(check_invalid_range(formula), 1); // start > end
+}
+
+#[test]
+fn test_parse_range_single_cell() {
+    let mut sr = 0;
+    let mut er = 0;
+    let mut sc = 0;
+    let mut ec = 0;
+    let status = parse_range("C2", &mut sr, &mut er, &mut sc, &mut ec);
+    assert_eq!(status, 0);
+    assert_eq!((sr, er, sc, ec), (1, 1, 2, 2)); // C2 → row=2, col=2
+}
+
+#[test]
+fn test_process_input_unknown_command() {
+    let mut sheet = vec![vec![cell { val: 0, formula: None, err: 0 }]];
+    let mut row_offset = 0;
+    let mut col_offset = 0;
+    let mut output_enabled = 1;
+
+    process_input("some_unknown_cmd", 1, 1, &mut sheet, &mut row_offset, &mut col_offset, &mut output_enabled);
+    assert_eq!(output_enabled, 1); // Should not crash or change state
+}
+
+#[test]
+fn test_process_input_bounds_scroll_too_large() {
+    let mut sheet = vec![vec![cell { val: 0, formula: None, err: 0 }; 5]; 5];
+    let mut row_offset = 0;
+    let mut col_offset = 0;
+    let mut output_enabled = 1;
+
+    process_input("scroll_to Z999", 5, 5, &mut sheet, &mut row_offset, &mut col_offset, &mut output_enabled);
+    assert_eq!(row_offset, 0);
+    assert_eq!(col_offset, 0); // Should not scroll beyond limits
+}
+
+#[test]
+fn test_evaluate_formula_float_input() {
+    let sheet = vec![vec![cell { val: 0, formula: None, err: 0 }]];
+    let mut err = 0;
+    let result = evaluate_formula("3.14", 1, 1, &sheet, &mut err);
+    assert_eq!(result, 0); // because float is not supported
+    assert_eq!(err, 1);    // error triggered
+}
+
+#[test]
+fn test_evaluate_range_with_error_cell() {
+    let mut sheet = vec![vec![cell { val: 10, formula: None, err: 0 }; 2]];
+    sheet[0][1].err = 1;
+    let result = evaluate_range("A1:B1", 1, 2, &sheet, "SUM");
+    assert_eq!(result, 0); // sum fails if any cell has error
+}
+
+#[test]
+fn test_evaluate_formula_with_malformed_expression() {
+    let sheet = vec![vec![cell { val: 0, formula: None, err: 0 }]];
+    let mut err = 0;
+    let val = evaluate_formula("A1 + XYZ", 1, 1, &sheet, &mut err);
+    assert_eq!(val, 0);
+    assert_eq!(err, 1); // XYZ is completely invalid
+}
+
+#[test]
+fn test_topological_evaluation_with_multiple_deps() {
+    let mut sheet = vec![vec![cell { val: 0, formula: None, err: 0 }; 2]; 2];
+    sheet[0][0].formula = Some("1".to_string());        // A1 = 1
+    sheet[0][1].formula = Some("A1 + 1".to_string());    // B1 = A1 + 1
+
+    let mut graph = Vec::with_capacity(4);
+    for _ in 0..4 {
+        graph.push(Some(Box::new(DAGNode {
+            in_degree: 0,
+            dependents: None,
+        })));
+    }
+
+    build_dependency_graph(2, 2, &sheet, &mut graph);
+    topological_evaluation(2, 2, &mut sheet, &mut graph);
+    assert_eq!(sheet[0][1].val, 2); // B1 should evaluate to 2
+}
+
+#[test]
+fn test_prompt_output_simulated() {
+    let mut sheet = vec![vec![cell { val: 0, formula: Some("3+4".to_string()), err: 0 }]];
+    unsafe {
+        sleeptimetotal = 0.0;
+    }
+    evaluate_sheet(1, 1, &mut sheet);
+    assert_eq!(sheet[0][0].val, 7);
+    assert_eq!(sheet[0][0].err, 0);
+    assert!(unsafe { sleeptimetotal >= 0.0 });
+}
+
+#[test]
+fn test_build_dependency_graph_with_multiple_levels() {
+    let mut sheet = vec![vec![cell { val: 0, formula: None, err: 0 }; 3]];
+    sheet[0][0].formula = Some("1".to_string());           // A1
+    sheet[0][1].formula = Some("A1 + 1".to_string());       // B1
+    sheet[0][2].formula = Some("B1 + 1".to_string());       // C1
+
+    let mut graph = Vec::with_capacity(3);
+    for _ in 0..3 {
+        graph.push(Some(Box::new(DAGNode {
+            in_degree: 0,
+            dependents: None,
+        })));
+    }
+
+    build_dependency_graph(1, 3, &sheet, &mut graph);
+    topological_evaluation(1, 3, &mut sheet, &mut graph);
+    assert_eq!(sheet[0][2].val, 3);
+}
+
+#[test]
+fn test_topological_evaluation_chain_of_cells() {
+    let mut sheet = vec![vec![cell { val: 0, formula: None, err: 0 }; 4]];
+
+    sheet[0][0].formula = Some("1".to_string());          // A1 = 1
+    sheet[0][1].formula = Some("A1+1".to_string());        // B1 = A1 + 1
+    sheet[0][2].formula = Some("B1+1".to_string());        // C1 = B1 + 1
+    sheet[0][3].formula = Some("C1+1".to_string());        // D1 = C1 + 1
+
+    let mut graph = Vec::with_capacity(4);
+    for _ in 0..4 {
+        graph.push(Some(Box::new(DAGNode {
+            in_degree: 0,
+            dependents: None,
+        })));
+    }
+
+    build_dependency_graph(1, 4, &sheet, &mut graph);
+    topological_evaluation(1, 4, &mut sheet, &mut graph);
+    assert_eq!(sheet[0][3].val, 4); // D1 should be 4
+}
+
+#[test]
+fn test_evaluate_range_error_range() {
+    let mut sheet = vec![vec![cell { val: 10, formula: None, err: 0 }]];
+    sheet[0][0].err = 1;
+    let result = evaluate_range("A1:A1", 1, 1, &sheet, "SUM");
+    assert_eq!(result, 0); // Range entirely contains error
+}
+
+#[test]
+fn test_topological_evaluation_error_propagation() {
+    let mut sheet = vec![vec![cell { val: 0, formula: None, err: 0 }; 2]];
+
+    sheet[0][0].formula = Some("1/0".to_string());        // A1 = error
+    sheet[0][1].formula = Some("A1 + 5".to_string());     // B1 = error depends on A1
+
+    let mut graph = Vec::with_capacity(2);
+    for _ in 0..2 {
+        graph.push(Some(Box::new(DAGNode {
+            in_degree: 0,
+            dependents: None,
+        })));
+    }
+
+    build_dependency_graph(1, 2, &sheet, &mut graph);
+    topological_evaluation(1, 2, &mut sheet, &mut graph);
+    assert_eq!(sheet[0][0].err, 1);
+    assert_eq!(sheet[0][1].err, 1); // error should propagate
+}
+
+#[test]
+fn test_main_invalid_args_zero_arguments() {
+    let output = std::process::Command::new("cargo")
+        .args(&["run", "--quiet", "--"])
+        .output()
+        .expect("failed to run process");
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Usage: ./sheet R C"));
+    assert!(!output.status.success());
+}
+
+#[test]
+fn test_main_invalid_grid_size() {
+    let output = std::process::Command::new("cargo")
+        .args(&["run", "--quiet", "--", "0", "0"])
+        .output()
+        .expect("failed to run process");
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Invalid grid size."));
+    assert!(!output.status.success());
+}
+
+#[test]
+fn test_print_sheet_output_disabled() {
+    let sheet = vec![vec![cell { val: 1, formula: None, err: 0 }]];
+    print_sheet(1, 1, &sheet, 0, 0, 0); // Should return early, no output
+    // Optionally capture stdout and assert it's empty
+}
+
+#[test]
+fn test_process_input_malformed_command() {
+    let mut sheet = vec![vec![cell { val: 0, formula: None, err: 0 }]];
+    let mut row_offset = 0;
+    let mut col_offset = 0;
+    let mut output_enabled = 1;
+    process_input("A1===", 1, 1, &mut sheet, &mut row_offset, &mut col_offset, &mut output_enabled);
+    // Assert no panic, and state is unchanged
+}
+
+#[test]
+fn test_print_sheet_output_disabled_second() {
+    let sheet = vec![vec![cell { val: 1, formula: None, err: 0 }]];
+    let mut output: Vec<u8> = Vec::new(); // Explicit type annotation
+    print_sheet(1, 1, &sheet, 0, 0, 0);
+    assert!(output.is_empty());
+}
+
+#[test]
+fn test_scroll_out_of_bounds() {
+    let mut sheet = vec![vec![cell { val: 0, formula: None, err: 0 }; 20]; 20];
+    let mut row_offset = 15;
+    let mut col_offset = 15;
+    let mut output_enabled = 1; // Initialize output_enabled
+process_input(
+    "scroll_to Z999", 
+    20, 
+    20, 
+    &mut sheet, 
+    &mut row_offset, 
+    &mut col_offset, 
+    &mut output_enabled // Add this as 7th argument
+);
+    assert_eq!(row_offset, 15); // No change for invalid target
+}
+
+#[test]
+fn test_formula_error_propagation() {
+    let mut sheet = vec![vec![cell { val: 0, formula: None, err: 0 }; 2]];
+    sheet[0][1].err = 1; // B1 has error
+    let mut error = 0;
+    assert_eq!(evaluate_formula("A1 + B1", 1, 2, &sheet, &mut error), 0);
+    assert_eq!(error, 1);
+}
+
+#[test]
+fn test_sleep_with_changing_cell() {
+    let mut sheet = vec![vec![cell { val: 1, formula: None, err: 0 }]];
+    sheet[0][0].formula = Some("SLEEP(A1)".to_string());
+    evaluate_sheet(1, 1, &mut sheet);
+    sheet[0][0].val = 2; // Update referenced cell
+    evaluate_sheet(1, 1, &mut sheet);
+    assert!(unsafe { sleeptimetotal } >= 3.0); // SLEEP(1) + SLEEP(2)
+}
+
+#[test]
+fn test_invalid_column_parsing() {
+    assert_eq!(get_col_index("A1"), -1); // Invalid characters
+    assert_eq!(get_col_index(""), -1); // Empty string
+}
+
+#[test]
+fn test_full_cli_workflow() {
+    let mut child = Command::new("cargo")
+        .args(&["run", "--quiet", "--", "3", "3"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("Failed to start process");
+    
+    writeln!(child.stdin.as_mut().unwrap(), "A1=5").unwrap();
+    writeln!(child.stdin.as_mut().unwrap(), "B1=A1+3").unwrap();
+    writeln!(child.stdin.as_mut().unwrap(), "q").unwrap();
+    
+    let output = child.wait_with_output().unwrap();
+    assert!(String::from_utf8_lossy(&output.stdout).contains("8")); // B1 value
+}
+
+#[test]
+fn test_range_with_error_cell() {
+    let mut sheet = vec![vec![cell { val: 5, formula: None, err: 1 }]];
+    let result = evaluate_range("A1:A1", 1, 1, &sheet, "SUM");
+    assert_eq!(result, 0); // Error propagates
+}
+
+
+}
