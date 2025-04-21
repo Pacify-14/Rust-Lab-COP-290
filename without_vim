@@ -91,6 +91,30 @@ fn print_columns(C: i32, col_offset: i32) {
     println!();
 }
 
+fn is_valid_formula(formula: &str) -> bool {
+    let re_arith = Regex::new(r"^\s*([A-Z]+\d+|\d+)\s*([\+\-\*/])\s*([A-Z]+\d+|\d+)\s*$").unwrap();
+    if re_arith.is_match(formula) {
+        return true;
+    }
+    let re_range_func = Regex::new(r"^(SUM|AVG|MIN|MAX|STDEV)\([A-Z]+\d+:[A-Z]+\d+\)$").unwrap();
+    if re_range_func.is_match(formula) {
+        return true;
+    }
+    let re_sleep = Regex::new(r"^SLEEP\((\d+|[A-Z]+\d+)\)$").unwrap();
+    if re_sleep.is_match(formula) {
+        return true;
+    }
+    let re_cell = Regex::new(r"^[A-Z]+\d+$").unwrap();
+    if re_cell.is_match(formula) {
+        return true;
+    }
+    if formula.trim().parse::<i32>().is_ok() {
+        return true;
+    }
+    false
+}
+
+
 fn process_input(input: &str, R: i32, C: i32, sheet: &mut Vec<Vec<cell>>, row_offset: &mut i32, col_offset: &mut i32, output_enabled: &mut i32) {
     unsafe {
         sleeptimetotal = 0.0;
@@ -164,11 +188,17 @@ fn process_input(input: &str, R: i32, C: i32, sheet: &mut Vec<Vec<cell>>, row_of
         }
         if colIndex >= 0 && colIndex < C && row >= 1 && row <= R {
             // Check for invalid range before storing the formula
-            if check_invalid_range(&formula) != 0 {
+            if check_invalid_range(&formula, row-1, colIndex) != 0 {
                 unsafe { inval_r = true; }
                 // Don't store the formula if range is invalid
                 return;
             }
+            
+            if !is_valid_formula(&formula) {
+    unsafe { unrec_cmd = true; }
+    return;
+}
+            
             // Store the formula only if range is valid
             let r_index = (row - 1) as usize;
             let c_index = colIndex as usize;
@@ -228,7 +258,7 @@ fn evaluate_formula(formula: &str, R: i32, C: i32, sheet: &Vec<Vec<cell>>, error
         // Check if it's a valid range function
         if func_name == "MAX" || func_name == "MIN" || func_name == "AVG" || 
             func_name == "SUM" || func_name == "STDEV" {
-                return evaluate_range(range, R, C, sheet, func_name);
+                return evaluate_range(range, R, C, sheet, func_name, error_flag);
         }
     }
 
@@ -785,6 +815,7 @@ fn is_reachable(graph: &Vec<Option<Box<DAGNode>>>, R: i32, C: i32, src: usize, t
     result
 }
 
+static mut cycle_detected: bool = false;
 // Updated add_dependency that checks for cycles before adding an edge.
 // dep_row/dep_col: the cell that depends on the reference cell (i.e. contains the formula)
 // ref_row/ref_col: the cell that is referenced (and hence must be computed first)
@@ -793,6 +824,11 @@ fn add_dependency(graph: &mut Vec<Option<Box<DAGNode>>>, dep_row: i32, dep_col: 
     if dep_row < 0 || dep_row >= R || dep_col < 0 || dep_col >= C ||
         ref_row < 0 || ref_row >= R || ref_col < 0 || ref_col >= C {
             return;  // Skip invalid indices
+    }
+    
+    if dep_row == ref_row && dep_col == ref_col {
+        unsafe { cycle_detected = true; }
+        return;
     }
 
     let dependent_index = (dep_row * C + dep_col) as usize;
@@ -828,9 +864,9 @@ fn add_dependency(graph: &mut Vec<Option<Box<DAGNode>>>, dep_row: i32, dep_col: 
     }
 }
 
-static mut cycle_detected: bool = false;
 
-fn check_invalid_range(formula: &str) -> i32 {
+
+fn check_invalid_range(formula: &str, current_row: i32, current_col: i32) -> i32 {
     let mut function = String::new();
     let mut col1 = String::new();
     let mut col2 = String::new();
@@ -877,12 +913,26 @@ fn check_invalid_range(formula: &str) -> i32 {
             if c1 > c2 || row1 > row2 {
                 return 1; // Invalid range
             }
+            
+            // Convert to 0-based indices
+            let start_col = get_col_index(&col1);
+            let end_col = get_col_index(&col2);
+            let start_row = row1 - 1;
+            let end_row = row2 - 1;
+            
+            // Check if current cell is within the range
+            if current_row >= start_row 
+                && current_row <= end_row
+                && current_col >= start_col
+                && current_col <= end_col {
+                return 1;
+            }
         }
     }
     0 // Valid range or not a range formula
 }
 
-fn evaluate_range(range: &str, R: i32, C: i32, sheet: &Vec<Vec<cell>>, func: &str) -> i32 {
+fn evaluate_range(range: &str, R: i32, C: i32, sheet: &Vec<Vec<cell>>, func: &str, error_flag: &mut i32) -> i32 {
     let mut start_row = 0;
     let mut end_row = 0;
     let mut start_col = 0;
@@ -901,7 +951,7 @@ fn evaluate_range(range: &str, R: i32, C: i32, sheet: &Vec<Vec<cell>>, func: &st
         for j in start_col..=end_col {
             if sheet[i as usize][j as usize].err != 0 {
                 // If any cell is already in error, indicate error for the range
-                unsafe { inval_r = true; }
+                *error_flag = 1; // Set error flag instead of global
                 return 0;
             }
             values.push(sheet[i as usize][j as usize].val);
@@ -1304,15 +1354,18 @@ mod tests {
     #[test]
     fn test_evaluate_sum_range() {
         let mut sheet = vec![vec![cell { val: 1, formula: None, err: 0 }; 2]; 2];
-        let result = evaluate_range("A1:B2", 2, 2, &sheet, "SUM");
+        let mut error_flag = 0;  
+        let result = evaluate_range("A1:B2", 2, 2, &sheet, "SUM", &mut error_flag);
         assert_eq!(result, 4);
     }
 
     #[test]
-    fn test_invalid_range_detection() {
-        assert_eq!(check_invalid_range("SUM(B2:A1)"), 1); // B2 to A1 = invalid
-        assert_eq!(check_invalid_range("AVG(A1:B2)"), 0); // valid
-    }
+fn test_invalid_range_detection() {
+    // Test with current cell at C3 (row 2, col 2) checking range A1:B2 (valid)
+    assert_eq!(check_invalid_range("AVG(A1:B2)", 2, 2), 0);
+    // Test with current cell inside range (A1 checking itself in range)
+    assert_eq!(check_invalid_range("MIN(A1:B2)", 0, 0), 1);
+}
 
     #[test]
     fn test_process_input_set_cell_formula() {
@@ -1590,7 +1643,8 @@ fn test_invalid_formula_out_of_bounds_ref() {
 #[test]
 fn test_evaluate_range_stdev_single_val() {
     let sheet = vec![vec![cell { val: 42, formula: None, err: 0 }]];
-    let result = evaluate_range("A1:A1", 1, 1, &sheet, "STDEV");
+    let mut error_flag = 0;  
+    let result = evaluate_range("A1:A1", 1, 1, &sheet, "STDEV", &mut error_flag);
     assert_eq!(result, 0); // STDEV of single value should be 0
 }
 
@@ -1609,7 +1663,7 @@ fn test_evaluate_formula_sleep_cell_changes() {
 #[test]
 fn test_check_invalid_range_bad_bounds() {
     let formula = "SUM(B3:A1)";
-    assert_eq!(check_invalid_range(formula), 1); // start > end
+    assert_eq!(check_invalid_range(formula,0,0), 1); // start > end
 }
 
 #[test]
@@ -1659,7 +1713,8 @@ fn test_evaluate_formula_float_input() {
 fn test_evaluate_range_with_error_cell() {
     let mut sheet = vec![vec![cell { val: 10, formula: None, err: 0 }; 2]];
     sheet[0][1].err = 1;
-    let result = evaluate_range("A1:B1", 1, 2, &sheet, "SUM");
+    let mut error_flag = 0;  
+    let result = evaluate_range("A1:B1", 1, 2, &sheet, "MAX", &mut error_flag);
     assert_eq!(result, 0); // sum fails if any cell has error
 }
 
@@ -1749,7 +1804,8 @@ fn test_topological_evaluation_chain_of_cells() {
 fn test_evaluate_range_error_range() {
     let mut sheet = vec![vec![cell { val: 10, formula: None, err: 0 }]];
     sheet[0][0].err = 1;
-    let result = evaluate_range("A1:A1", 1, 1, &sheet, "SUM");
+    let mut error_flag = 0;  
+    let result = evaluate_range("A1:A1", 1, 1, &sheet, "MIN", &mut error_flag);
     assert_eq!(result, 0); // Range entirely contains error
 }
 
@@ -1882,7 +1938,8 @@ fn test_full_cli_workflow() {
 #[test]
 fn test_range_with_error_cell() {
     let mut sheet = vec![vec![cell { val: 5, formula: None, err: 1 }]];
-    let result = evaluate_range("A1:A1", 1, 1, &sheet, "SUM");
+    let mut error_flag = 0;  
+    let result = evaluate_range("A1:A1", 1, 1, &sheet, "AVG", &mut error_flag);
     assert_eq!(result, 0); // Error propagates
 }
 
