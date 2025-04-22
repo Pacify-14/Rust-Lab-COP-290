@@ -36,7 +36,13 @@ A powerful spreadsheet editor with Vim-like keybindings and commands, offering a
 
 - **Formulas**:
   - Basic arithmetic: `=A1+B1`, `=C1*D1`, etc.
-  - Statistical functions: `=AVERAGE(A1:A10)`, `=STDDEV(B1:B10)`, `=PERCENTILE(C1:C10,0.75)`
+  - Statistical functions: 
+    - `=AVG(A1:A10)` - Calculate average
+    - `=MAX(A1:B2)` - Find maximum value
+    - `=MIN(A1:B2)` - Find minimum value
+    - `=SUM(A1:B2)` - Calculate sum
+    - `=STDDEV(B1:B10)` - Calculate standard deviation
+    
   - Batch formula assignment: `:i in 1..10: Ai = Bi + 1`
 
 ### Clipboard Operations
@@ -83,7 +89,7 @@ A powerful spreadsheet editor with Vim-like keybindings and commands, offering a
 | Command | Description |
 |---------|-------------|
 | `h`, `j`, `k`, `l` | Move left, down, up, right |
-| `gg` | Go to first row |
+| `g` | Go to first row |
 | `G` | Go to last row |
 | `0` | Go to first column |
 | `$` | Go to last column |
@@ -103,16 +109,20 @@ A powerful spreadsheet editor with Vim-like keybindings and commands, offering a
 | Formula | Description |
 |---------|-------------|
 | `=A1+B1` | Basic arithmetic |
-| `=AVERAGE(A1:A10)` | Calculate average of range |
+| `=SUM(A1:A10)` | Calculate sum of range |
+| `=AVG(A1:A10)` | Calculate average of range |
+| `=MAX(A1:B2)` | Find maximum value in range |
+| `=MIN(A1:B2)` | Find minimum value in range |
 | `=STDDEV(B1:B10)` | Calculate standard deviation of range |
-| `=PERCENTILE(C1:C10,0.75)` | Calculate 75th percentile of range |
+
 
 ### Batch Formula Commands
 
 | Command | Description |
 |---------|-------------|
 | `:i in 1..10: Ai = Bi + 1` | Set formulas for cells A1 to A10 |
-| `:i,j in 1..5,1..5: Ci,j = Ai,j + Bi,j` | Set formulas for a 2D range |
+| `:i in 1..10: Di = AVERAGE(Ai:Ci)` | Computing Average and other functionalities |
+| `:i in 1..10: Ei = SUM(Ai:Di)` | Computing Sum across rows |
 
 ### Search Commands
 
