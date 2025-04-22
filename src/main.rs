@@ -1,4 +1,4 @@
-#![allow(warnings)]
+
 use std::env;
 use regex::Regex;
 use std::io::{self, BufRead, Write};
@@ -707,18 +707,17 @@ fn build_dependency_graph(
                     }
                 }
                 // Case 7: SLEEP(value) - No dependency
-                else if {
-                    if f.starts_with("SLEEP(") {
-                        let inner = &f[6..f.len() - 1];
-                        if inner.trim().parse::<i32>().is_ok() {
-                            true
-                        } else {
-                            false
-                        }
-                    } else {
-                        false
-                    }
-                } {
+                else if if f.starts_with("SLEEP(") {
+                                        let inner = &f[6..f.len() - 1];
+                                    if inner.trim().parse::<i32>().is_ok() {
+                                           true
+                                      } else {
+                                             false
+                                        }
+                                    } else {
+                                        false
+                                  } {
+                    
                     // No dependencies; only execution delay
                 }
                 // Case 8: SLEEP(B1) - Depends on B1
@@ -1287,17 +1286,23 @@ fn main() {
     }
 
     // Original code path for standard mode
+    // Check if we have command-line arguments
     let args: Vec<String> = env::args().collect();
-    if args.len() != 3 {
-        println!("Usage: ./sheet R C");
-        process::exit(1);
-    }
-    let R: i32 = args[1].parse().unwrap_or(0);
-    let C: i32 = args[2].parse().unwrap_or(0);
+    let (R, C) = if args.len() >= 3 {
+        // Use command-line arguments
+        let r = args[1].parse::<i32>().unwrap_or(20);
+        let c = args[2].parse::<i32>().unwrap_or(20);
+        (r, c)
+    } else {
+        // Use the values from clap
+        (R, C)
+    };
+
     if R < 1 || R > 999 || C < 1 || C > (26 * 26 * 26 + 26 * 26 + 26) {
         println!("Invalid grid size.");
         process::exit(1);
     }
+    
     // Allocate sheet as a contiguous 2D vector.
     let mut sheet: Vec<Vec<cell>> = Vec::with_capacity(R as usize);
     for _ in 0..R {
