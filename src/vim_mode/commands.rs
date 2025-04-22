@@ -1,7 +1,7 @@
 //! Command handling for the Vim-like interface.
 
 use regex::Regex;
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::Path;
 
@@ -17,7 +17,7 @@ pub fn execute_command(
     cols: i32,
 ) -> Result<(), String> {
     let cmd = command.trim_start_matches(':');
-
+    
     // Quit commands
     if cmd == "q" || cmd == "quit" {
         return Err("quit".to_string()); // Signal to quit

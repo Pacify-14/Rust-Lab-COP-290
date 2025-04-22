@@ -4,7 +4,7 @@ use crossterm::{
     cursor,
     event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
     execute,
-    style::{self, Color, Stylize},
+    style::{self, Color},
     terminal::{self, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use std::io::{self, Write};
@@ -44,32 +44,34 @@ pub fn render_sheet(
         cursor::MoveTo(0, 0)
     )?;
 
-    // Calculate visible range - use smaller viewport for better display
-    let visible_rows = (term_height - 3).min(25) as usize;
-    let visible_cols = (term_width / 12).min(15) as usize; // Wider columns for better readability
+    // Calculate visible range
+    let visible_rows = (term_height - 3).min(20) as usize;
+    let visible_cols = (term_width / 10).min(10) as usize;
 
     let row_offset = state.row_offset;
     let col_offset = state.col_offset;
 
-    // Render column headers with better spacing
-    print!("     "); // Extra space for row numbers
+    // Render header row with column labels
+    print!("      "); // Space for row numbers
     for col in col_offset..(col_offset + visible_cols.min(cols as usize - col_offset)) {
         let col_name = column_name(col);
-        print!("{:^10} ", col_name); // Added extra space
+        print!("{:^8} ", col_name);
     }
     println!();
 
     // Add a separator line
-    print!("     ");
+    print!("      ");
     for _ in col_offset..(col_offset + visible_cols.min(cols as usize - col_offset)) {
-        print!("---------- ");
+        print!("-------- ");
     }
     println!();
 
-    // Render rows with better spacing
+    // Render each row
     for row in row_offset..(row_offset + visible_rows.min(rows as usize - row_offset)) {
-        print!("{:3} | ", row + 1); // Added separator
+        // Print row number at the beginning of each line
+        print!("{:4} | ", row + 1);
 
+        // Print cells in this row
         for col in col_offset..(col_offset + visible_cols.min(cols as usize - col_offset)) {
             let is_cursor = row == state.cursor_row && col == state.cursor_col;
             let is_selected = match state.get_visual_selection() {
@@ -94,16 +96,19 @@ pub fn render_sheet(
                 )?;
             }
 
-            print!("{:^10}", cell_value);
+            print!("{:^8}", cell_value);
 
             if is_cursor || is_selected {
                 execute!(io::stdout(), style::SetAttribute(style::Attribute::Reset))?;
             }
 
-            print!(" "); // Add space between columns
+            print!(" ");
         }
-        println!();
+        println!(); // End of row - move to next line
     }
+
+    // Add a blank line before status bar
+    println!();
 
     // Render status bar
     let current_cell = format!("{}{}", column_name(state.cursor_col), state.cursor_row + 1);
@@ -176,24 +181,14 @@ pub fn render_sheet(
                 cursor::MoveTo(state.command_buffer.len() as u16, term_height - 1)
             )?;
         }
-        Mode::Insert => {
+        Mode::Insert | _ => {
             // Show cursor at current cell
-            let cursor_x = 4 + (state.cursor_col - col_offset) * 10 + 5;
-            let cursor_y = (state.cursor_row - row_offset) + 1;
+            let cursor_x = 6 + (state.cursor_col - col_offset) * 9 + 4; // Adjusted for new column width
+            let cursor_y = (state.cursor_row - row_offset) + 2; // +2 for header rows
 
             execute!(
                 io::stdout(),
-                cursor::MoveTo(cursor_x as u16, cursor_y as u16) // Removed the problematic cursor style line
-            )?;
-        }
-        _ => {
-            // Show cursor at current cell
-            let cursor_x = 4 + (state.cursor_col - col_offset) * 10 + 5;
-            let cursor_y = (state.cursor_row - row_offset) + 1;
-
-            execute!(
-                io::stdout(),
-                cursor::MoveTo(cursor_x as u16, cursor_y as u16) // Removed the problematic cursor style line
+                cursor::MoveTo(cursor_x as u16, cursor_y as u16)
             )?;
         }
     }
@@ -211,14 +206,14 @@ pub fn handle_input(
 ) -> io::Result<bool> {
     if let Event::Key(key) = event::read()? {
         match state.mode {
-            Mode::Normal => handle_normal_mode(key, state, sheet, rows, cols)?,
-            Mode::Insert => handle_insert_mode(key, state, sheet, rows, cols)?,
-            Mode::Command => handle_command_mode(key, state, sheet, rows, cols)?,
-            Mode::Visual { .. } => handle_visual_mode(key, state, sheet, rows, cols)?,
-        };
-    };
-
-    Ok(true) // Continue running
+            Mode::Normal => handle_normal_mode(key, state, sheet, rows, cols),
+            Mode::Insert => handle_insert_mode(key, state, sheet, rows, cols),
+            Mode::Command => handle_command_mode(key, state, sheet, rows, cols),
+            Mode::Visual { .. } => handle_visual_mode(key, state, sheet, rows, cols),
+        }
+    } else {
+        Ok(true) // Continue running if not a key event
+    }
 }
 
 /// Handles keyboard input in normal mode.

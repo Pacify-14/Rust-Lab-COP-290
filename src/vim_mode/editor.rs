@@ -1,8 +1,8 @@
 //! Editor state and mode handling for the Vim-like interface.
-
-use crate::{cell, evaluate_sheet, get_col_index};
-use std::io;
+use egui::ViewportBuilder;
+use crate::{cell, evaluate_sheet};
 use std::process;
+use std::sync::{Arc, Mutex};
 
 /// Represents the current editing mode of the Vim-like interface.
 #[derive(PartialEq, Clone, Debug)]
@@ -110,37 +110,30 @@ impl EditorState {
     /// Switches to insert mode.
     pub fn enter_insert_mode(&mut self, sheet: &Vec<Vec<cell>>) {
         self.mode = Mode::Insert;
-        self.status_message = String::from("-- INSERT --");
-
-        // Initialize edit buffer with current cell's formula or value
-        if let Some(ref formula) = sheet[self.cursor_row][self.cursor_col].formula {
-            self.edit_buffer = formula.clone();
-        } else {
-            self.edit_buffer = sheet[self.cursor_row][self.cursor_col].val.to_string();
-        }
+        self.status_message = String::from("-- INSERT MODE --");
+        
+        // Rest of the method...
     }
-
-    /// Switches to normal mode.
+    
     pub fn enter_normal_mode(&mut self) {
         self.mode = Mode::Normal;
-        self.status_message = String::from("Normal mode");
+        self.status_message = String::from("-- NORMAL MODE --");
         self.edit_buffer.clear();
     }
-
-    /// Switches to command mode.
+    
     pub fn enter_command_mode(&mut self) {
         self.mode = Mode::Command;
+        self.status_message = String::from("-- COMMAND MODE --");
         self.command_buffer.clear();
         self.command_buffer.push(':');
     }
-
-    /// Switches to visual mode.
+    
     pub fn enter_visual_mode(&mut self) {
         self.mode = Mode::Visual {
             start_row: self.cursor_row,
             start_col: self.cursor_col,
         };
-        self.status_message = String::from("-- VISUAL --");
+        self.status_message = String::from("-- VISUAL MODE --");
     }
 
     /// Gets the current visual selection range, if in visual mode.
@@ -199,19 +192,53 @@ pub fn run_vim_interface(rows: i32, cols: i32) {
     }
 
     // Initialize sheet
-    let mut sheet: Vec<Vec<cell>> = Vec::with_capacity(rows as usize);
-    for _ in 0..rows {
-        let mut row_vec: Vec<cell> = Vec::with_capacity(cols as usize);
-        for _ in 0..cols {
-            row_vec.push(cell {
-                val: 0,
-                formula: None,
-                err: 0,
-            });
-        }
-        sheet.push(row_vec);
-    }
+    let sheet: Vec<Vec<cell>> = (0..rows)
+        .map(|_| {
+            (0..cols)
+                .map(|_| cell {
+                    val: 0,
+                    formula: None,
+                    err: 0,
+                })
+                .collect()
+        })
+        .collect();
 
+    // Wrap sheet in Arc<Mutex<>> for thread-safe sharing
+    let sheet = Arc::new(Mutex::new(sheet));
+
+    // Check if we should use egui or terminal UI
+    if cfg!(feature = "egui") || true { // Always use egui for now
+        run_egui_interface(rows, cols, sheet);
+    } else {
+        run_terminal_interface(rows, cols, sheet);
+    }
+}
+
+/// Runs the egui-based interface
+fn run_egui_interface(rows: i32, cols: i32, sheet: Arc<Mutex<Vec<Vec<cell>>>>) {
+    let app = crate::vim_mode::egui_ui::SpreadsheetApp::new(rows, cols, sheet);
+    
+    let mut native_options = eframe::NativeOptions::default();
+
+// Set only the fields you need
+native_options.viewport = ViewportBuilder::default()
+    .with_inner_size([1024.0, 768.0])
+    .with_min_inner_size([800.0, 600.0]);
+
+eframe::run_native(
+    "Vim Spreadsheet",
+    native_options,
+    Box::new(|_cc| Box::new(app)),
+)
+.expect("Failed to start egui application");
+}
+
+/// Runs the terminal-based interface
+fn run_terminal_interface(rows: i32, cols: i32, sheet_arc: Arc<Mutex<Vec<Vec<cell>>>>) {
+    // Extract the sheet from Arc<Mutex<>> for terminal UI
+    let mut sheet = sheet_arc.lock().unwrap().clone();
+    
     // Initialize editor state
     let mut state = EditorState::new();
     state.reset_view();
@@ -231,17 +258,17 @@ pub fn run_vim_interface(rows: i32, cols: i32) {
         if let Err(e) = crate::vim_mode::ui::render_sheet(&sheet, &state, rows, cols) {
             cleanup_and_exit(&e.to_string());
         }
-
+        
         // Handle input
         match crate::vim_mode::ui::handle_input(&mut state, &mut sheet, rows, cols) {
             Ok(true) => {
-                // Evaluate sheet after changes
+                // Continue running
                 evaluate_sheet(rows, cols, &mut sheet);
-            }
+            },
             Ok(false) => {
                 // Exit requested
                 break;
-            }
+            },
             Err(e) => {
                 cleanup_and_exit(&e.to_string());
             }
