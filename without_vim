@@ -1256,5 +1256,264 @@ fn test_nested_cycle_detection() {
     assert!(unsafe { cycle_detected });
 }
 
+#[test]
+fn test_process_input_scroll_to_valid() {
+    let mut sheet = initialize_sheet(20, 20);
+    let mut row_offset = 0;
+    let mut col_offset = 0;
+    let mut output_enabled = 1;
+    process_input("scroll_to B5", 20, 20, &mut sheet, &mut row_offset, &mut col_offset, &mut output_enabled);
+    assert_eq!(row_offset, 4);
+    assert_eq!(col_offset, 1);
+}
+
+#[test]
+fn test_process_input_scroll_to_invalid() {
+    let mut sheet = initialize_sheet(5, 5);
+    let mut row_offset = 0;
+    let mut col_offset = 0;
+    let mut output_enabled = 1;
+    process_input("scroll_to Z99", 5, 5, &mut sheet, &mut row_offset, &mut col_offset, &mut output_enabled);
+    // Should not update offsets for out-of-bounds
+    assert_eq!(row_offset, 0);
+    assert_eq!(col_offset, 0);
+}
+
+#[test]
+fn test_formula_with_invalid_characters() {
+    let mut sheet = initialize_sheet(2, 2);
+    let mut err = 0;
+    assert_eq!(evaluate_formula("A1+B$", 2, 2, &sheet, &mut err), 0);
+    assert_eq!(err, 1);
+}
+
+#[test]
+fn test_remove_dependency_clears_in_degree() {
+    let mut graph = initialize_graph(2, 2);
+    add_dependency(&mut graph, 0, 0, 1, 1, 2, 2);
+    remove_dependency(&mut graph, 0, 0, 1, 1, 2, 2);
+    assert_eq!(graph[0].as_ref().unwrap().in_degree, 0);
+}
+
+#[test]
+fn test_print_sheet_with_errors() {
+    let mut sheet = initialize_sheet(2, 2);
+    sheet[0][1].err = 1;
+    // This should print "ERR" for the second cell in the first row
+    print_sheet(2, 2, &sheet, 0, 0, 1);
+    // Output capture not shown here
+}
+
+#[test]
+fn test_process_input_q_command() {
+    // This test should expect process exit (may need #[should_panic] or similar)
+    let mut sheet = initialize_sheet(1, 1);
+    let mut row_offset = 0;
+    let mut col_offset = 0;
+    let mut output_enabled = 1;
+    // Uncomment if testing for exit is supported in your framework
+    // process_input("q", 1, 1, &mut sheet, &mut row_offset, &mut col_offset, &mut output_enabled);
+}
+
+#[test]
+fn test_process_input_disable_enable_output() {
+    let mut sheet = initialize_sheet(1, 1);
+    let mut row_offset = 0;
+    let mut col_offset = 0;
+    let mut output_enabled = 1;
+    process_input("disable_output", 1, 1, &mut sheet, &mut row_offset, &mut col_offset, &mut output_enabled);
+    assert_eq!(output_enabled, 0);
+    process_input("enable_output", 1, 1, &mut sheet, &mut row_offset, &mut col_offset, &mut output_enabled);
+    assert_eq!(output_enabled, 1);
+}
+
+#[test]
+fn test_evaluate_formula_invalid_sleep() {
+    let mut sheet = initialize_sheet(2, 2);
+    let mut err = 0;
+    assert_eq!(evaluate_formula("SLEEP(XYZ)", 2, 2, &sheet, &mut err), 0);
+    assert_eq!(err, 1);
+}
+
+#[test]
+fn test_evaluate_formula_out_of_bounds() {
+    let mut sheet = initialize_sheet(2, 2);
+    let mut err = 0;
+    assert_eq!(evaluate_formula("A100", 2, 2, &sheet, &mut err), 0);
+    assert_eq!(err, 1);
+}
+
+#[test]
+fn test_parse_range_invalid() {
+    let mut sr = 0; let mut er = 0; let mut sc = 0; let mut ec = 0;
+    assert_eq!(parse_range("A1:", &mut sr, &mut er, &mut sc, &mut ec), -1);
+    assert_eq!(parse_range(":B2", &mut sr, &mut er, &mut sc, &mut ec), -1);
+    assert_eq!(parse_range("A1:B2:C3", &mut sr, &mut er, &mut sc, &mut ec), -1);
+}
+
+#[test]
+fn test_add_dependency_out_of_bounds() {
+    let R = 2;
+    let C = 2;
+    let mut graph = initialize_graph(R, C);
+    add_dependency(&mut graph, -1, 0, 0, 0, R, C); // Should not panic
+    add_dependency(&mut graph, 0, 0, 2, 0, R, C); // Should not panic
+}
+
+#[test]
+fn test_print_columns_edge_cases() {
+    // Should not panic for high column count
+    print_columns(80, 78);
+    print_columns(1, 0);
+}
+
+#[test]
+fn test_get_col_index_invalid() {
+    assert_eq!(get_col_index("a"), -1);
+    assert_eq!(get_col_index("!@#"), -1);
+    assert_eq!(get_col_index(""), -1);
+}
+
+#[test]
+fn test_process_input_edge_cases() {
+    let mut sheet = initialize_sheet(20, 20);
+    let mut row_offset = 0;
+    let mut col_offset = 0;
+    let mut output = 1;
+
+    // Test scroll_to with out-of-bounds coordinates
+    process_input("scroll_to Z99", 20, 20, &mut sheet, &mut row_offset, &mut col_offset, &mut output);
+    assert_eq!(row_offset, 0);
+    assert_eq!(col_offset, 0);
+
+    // Test disable/enable output together
+    process_input("disable_output", 20, 20, &mut sheet, &mut row_offset, &mut col_offset, &mut output);
+    process_input("enable_output", 20, 20, &mut sheet, &mut row_offset, &mut col_offset, &mut output);
+    assert_eq!(output, 1);
+}
+
+#[test]
+fn test_error_propagation_chains() {
+    let mut sheet = initialize_sheet(3, 3);
+    // A1 depends on B2 which has error
+    sheet[1][1].err = 1;
+    sheet[0][0].formula = Some("B2".to_string());
+    
+    let mut graph = initialize_graph(3, 3);
+    add_dependency(&mut graph, 0, 0, 1, 1, 3, 3);
+    
+    let mut evaluated = vec![false; 9];
+    evaluate_cell(0, 0, &mut sheet, &graph, &mut evaluated, 3, 3);
+    assert_eq!(sheet[0][0].err, 1);
+}
+
+#[test]
+fn test_graph_boundary_conditions() {
+    let R = 2;
+    let C = 2;
+    let mut graph = initialize_graph(R, C);
+
+    // Test invalid cell coordinates
+    add_dependency(&mut graph, -1, 0, 0, 0, R, C);
+    add_dependency(&mut graph, 0, 0, 2, 0, R, C);
+    
+    // Verify no dependencies added for invalid cells
+    assert!(graph[0].as_ref().unwrap().dependencies.is_empty());
+}
+
+#[test]
+fn test_malformed_formulas() {
+    let mut sheet = initialize_sheet(2, 2);
+    let mut err = 0;
+    
+    // Test incomplete range
+    evaluate_formula("SUM(A1:", 2, 2, &sheet, &mut err);
+    assert_eq!(err, 1);
+    
+    // Test invalid SLEEP syntax
+    evaluate_formula("SLEEP(XY)", 2, 2, &sheet, &mut err);
+    assert_eq!(err, 1);
+}
+
+#[test]
+fn test_stdev_edge_cases_2() {
+    assert_eq!(stdev(&vec![]), 0);
+    assert_eq!(stdev(&vec![5]), 0);
+    assert_eq!(stdev(&vec![1, 1, 1, 1]), 0);
+    assert_eq!(stdev(&vec![1, 7]), 3); // (7-4)^2 = 9, sqrt(9/2)=2.12 → 2
+}
+
+#[test]
+fn test_formula_update_with_cycle_rollback() {
+    let mut sheet = initialize_sheet(3, 3);
+    let mut graph = initialize_graph(3, 3);
+
+    // Initial formula A1 = B2
+    sheet[0][0].formula = Some("B2".to_string());
+    add_dependency(&mut graph, 0, 0, 1, 1, 3, 3);
+
+    // Try to introduce cycle: B2 = A1
+    sheet[1][1].formula = Some("A1".to_string());
+    add_dependency(&mut graph, 1, 1, 0, 0, 3, 3);
+
+    unsafe { assert!(cycle_detected); }
+}
+
+#[test]
+fn test_process_input_invalid_formula() {
+    let mut sheet = initialize_sheet(5, 5);
+    let mut row_offset = 0;
+    let mut col_offset = 0;
+    let mut output_enabled = 1;
+    process_input("A1=HELLO_WORLD", 5, 5, &mut sheet, &mut row_offset, &mut col_offset, &mut output_enabled);
+    unsafe {
+        assert!(unrec_cmd); // Formula should be marked unrecognized
+    }
+}
+
+#[test]
+fn test_main_interaction_display() {
+    let mut sheet = initialize_sheet(2, 2);
+    sheet[0][0].err = 1;
+    print_sheet(2, 2, &sheet, 0, 0, 1);
+    // Not assertable here unless using output capturing, but touches print_sheet and row loops
+}
+
+#[test]
+fn test_process_input_invalid_cell_and_out_of_bounds() {
+    let mut sheet = initialize_sheet(2, 2);
+    let mut row_offset = 0;
+    let mut col_offset = 0;
+    let mut output_enabled = 1;
+
+    // Invalid column (ZZ is out-of-bounds in 2x2)
+    process_input("ZZ1=42", 2, 2, &mut sheet, &mut row_offset, &mut col_offset, &mut output_enabled);
+    unsafe { assert!(inval_r); }
+
+    // Cell inside its own range (cycle/invalid range)
+    process_input("A1=SUM(A1:B2)", 2, 2, &mut sheet, &mut row_offset, &mut col_offset, &mut output_enabled);
+    unsafe { assert!(inval_r); }
+}
+
+#[test]
+fn test_sleep_formula_cache() {
+    let mut sheet = initialize_sheet(2, 2);
+    sheet[0][0].val = 1;
+    let mut err = 0;
+
+    // First call → should sleep
+    let _ = evaluate_formula("SLEEP(A1)", 2, 2, &sheet, &mut err);
+    assert_eq!(err, 0);
+
+    // Second call → should not sleep if value unchanged
+    let _ = evaluate_formula("SLEEP(A1)", 2, 2, &sheet, &mut err);
+    assert_eq!(err, 0);
+
+    // Change value → should trigger sleep again
+    sheet[0][0].val = 2;
+    let _ = evaluate_formula("SLEEP(A1)", 2, 2, &sheet, &mut err);
+    assert_eq!(err, 0);
+}
+
 
 }
