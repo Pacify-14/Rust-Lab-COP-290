@@ -112,7 +112,17 @@ impl EditorState {
         self.mode = Mode::Insert;
         self.status_message = String::from("-- INSERT MODE --");
         
-        // Rest of the method...
+        // Initialize edit buffer with current cell's formula or value
+        let row = self.cursor_row;
+        let col = self.cursor_col;
+        
+        if let Some(ref formula) = sheet[row][col].formula {
+            // If it has a formula, show it with = prefix
+            self.edit_buffer = format!("={}", formula);
+        } else {
+            // Otherwise just show the value
+            self.edit_buffer = sheet[row][col].val.to_string();
+        }
     }
     
     pub fn enter_normal_mode(&mut self) {
@@ -156,16 +166,29 @@ impl EditorState {
 
     /// Applies the current edit buffer to the cell at the cursor position.
     pub fn apply_edit(&self, sheet: &mut Vec<Vec<cell>>) {
+        // ONLY modify the cell at the current cursor position
+        let row = self.cursor_row;
+        let col = self.cursor_col;
+        
         if self.edit_buffer.is_empty() {
-            sheet[self.cursor_row][self.cursor_col].formula = None;
-            sheet[self.cursor_row][self.cursor_col].val = 0;
+            // Clear the cell
+            sheet[row][col].formula = None;
+            sheet[row][col].val = 0;
+            sheet[row][col].err = 0;
+        } else if self.edit_buffer.starts_with('=') {
+            // It's a formula (starts with =)
+            let formula = self.edit_buffer[1..].to_string();
+            sheet[row][col].formula = Some(formula);
+            // Value will be calculated by evaluate_sheet
         } else if let Ok(value) = self.edit_buffer.parse::<i32>() {
-            // If it's a simple number, store it directly
-            sheet[self.cursor_row][self.cursor_col].formula = None;
-            sheet[self.cursor_row][self.cursor_col].val = value;
+            // It's a simple number
+            sheet[row][col].formula = None;
+            sheet[row][col].val = value;
+            sheet[row][col].err = 0;
         } else {
-            // Otherwise, treat it as a formula
-            sheet[self.cursor_row][self.cursor_col].formula = Some(self.edit_buffer.clone());
+            // It's a formula without the = prefix
+            sheet[row][col].formula = Some(self.edit_buffer.clone());
+            // Value will be calculated by evaluate_sheet
         }
     }
 }
