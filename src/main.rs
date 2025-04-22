@@ -1,4 +1,4 @@
-
+#![allow(warnings)]
 use std::env;
 use regex::Regex;
 use std::io::{self, BufRead, Write};
