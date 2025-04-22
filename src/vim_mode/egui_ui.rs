@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use egui::viewport::ViewportCommand;
 
 use crate::vim_mode::editor::{ClipboardContent, EditorState, Mode, column_name, parse_cell_reference};
-use crate::vim_mode::commands::execute_command;
+use crate::vim_mode::commands::{execute_command, find_next_match};
 use crate::{cell, evaluate_sheet};
 
 const CELL_SIZE: f32 = 80.0;
@@ -23,6 +23,8 @@ pub struct SpreadsheetApp {
     formula_editor: String,
     command_editor: String,
     should_exit: bool,
+    numeric_prefix: String,
+    
 }
 
 impl SpreadsheetApp {
@@ -37,6 +39,7 @@ impl SpreadsheetApp {
             formula_editor: String::new(),
             command_editor: String::new(),
             should_exit: false,
+            numeric_prefix: String::new(),
         }
     }
     fn render_title_bar(&self, ui: &mut Ui) {
@@ -88,8 +91,30 @@ impl SpreadsheetApp {
         });
         ui.separator();
     }
-
     fn handle_keyboard_input(&mut self, ctx: &egui::Context) {
+        // First, handle operations that need to modify the sheet directly
+        let mut need_to_delete_row = false;
+        let mut need_to_copy_row = false;
+        let mut need_to_delete_column = false;
+        let mut need_to_copy_column = false;
+        
+        
+        // Execute row/column operations before locking the sheet
+        if need_to_delete_row {
+            self.delete_row(self.state.cursor_row, 1);
+            self.state.status_message = format!("Deleted row {}", self.state.cursor_row + 1);
+        } else if need_to_copy_row {
+            self.copy_row(self.state.cursor_row, 1);
+            self.state.status_message = format!("Yanked row {}", self.state.cursor_row + 1);
+        } else if need_to_delete_column {
+            self.delete_column(self.state.cursor_col, 1);
+            self.state.status_message = format!("Deleted column {}", column_name(self.state.cursor_col));
+        } else if need_to_copy_column {
+            self.copy_column(self.state.cursor_col, 1);
+            self.state.status_message = format!("Yanked column {}", column_name(self.state.cursor_col));
+        }
+        
+        // Now handle the rest of the input with the sheet locked
         let mut sheet = self.sheet.lock().unwrap();
         
         // Handle key events based on current mode
@@ -106,6 +131,74 @@ impl SpreadsheetApp {
                     self.state.enter_normal_mode();
                 },
                 _ => {}
+            }
+        }
+        if let Mode::Normal = self.state.mode {
+            if ctx.input(|i| i.key_pressed(egui::Key::R) && i.modifiers.ctrl) {
+                {
+                   need_to_delete_row = true;
+               }
+           }
+           
+           // Check for Ctrl+Y (yank/copy row)
+           if ctx.input(|i| i.key_pressed(egui::Key::Y) && i.modifiers.ctrl) {
+               if ctx.input(|i| i.key_pressed(egui::Key::R)) {
+                   need_to_copy_row = true;
+               }
+           }
+           
+           // Check for Ctrl+C (delete column)
+           if ctx.input(|i| i.key_pressed(egui::Key::C) && i.modifiers.ctrl) {
+                {
+                   need_to_delete_column = true;
+               }
+           }
+           
+           // Check for Ctrl+Y (yank/copy column)
+           if ctx.input(|i| i.key_pressed(egui::Key::S) && i.modifiers.ctrl) {
+                {
+                   need_to_copy_column = true;
+               }
+           }
+            if ctx.input(|i| {
+                for event in &i.events {
+                    if let egui::Event::Text(text) = event {
+                        if text == "/" || text == "?" {
+                            return true;
+                        }
+                    }
+                }
+                false
+            }) {
+                let is_forward = ctx.input(|i| {
+                    for event in &i.events {
+                        if let egui::Event::Text(text) = event {
+                            return text == "/";
+                        }
+                    }
+                    false
+                });
+                
+                self.state.enter_command_mode();
+                if is_forward {
+                    self.command_editor = "/".to_string();
+                } else {
+                    self.command_editor = "?".to_string();
+                }
+                self.state.command_buffer = self.command_editor.clone();
+            }
+            
+            // Handle 'n' and 'N' for next/previous search match
+            if ctx.input(|i| i.key_pressed(egui::Key::N)) {
+                let forward = !ctx.input(|i| i.modifiers.shift);
+                
+                if self.state.search_pattern.is_none() {
+                    self.state.status_message = "No previous search".to_string();
+                } else {
+                    if !find_next_match(&mut self.state, forward) {
+                        self.state.status_message = "Pattern not found".to_string();
+                    }
+                }
             }
         }
         
@@ -126,7 +219,7 @@ impl SpreadsheetApp {
             }) {
                 self.state.enter_command_mode();
                 self.command_editor = self.state.command_buffer.clone();
-            }else if ctx.input(|i| i.key_pressed(egui::Key::V)) {
+            } else if ctx.input(|i| i.key_pressed(egui::Key::V)) {
                 self.state.enter_visual_mode();
                 self.state.status_message = String::from("-- VISUAL --");
             } else if ctx.input(|i| i.key_pressed(egui::Key::H)) {
@@ -136,8 +229,7 @@ impl SpreadsheetApp {
                         self.state.col_offset = self.state.cursor_col;
                     }
                 }
-            }
-             else if ctx.input(|i| i.key_pressed(egui::Key::J)) {
+            } else if ctx.input(|i| i.key_pressed(egui::Key::J)) {
                 if self.state.cursor_row + 1 < self.rows as usize {
                     self.state.cursor_row += 1;
                     if self.state.cursor_row >= self.state.row_offset + self.visible_rows {
@@ -158,19 +250,19 @@ impl SpreadsheetApp {
                         self.state.col_offset += 1;
                     }
                 }
-            } else if ctx.input(|i| i.key_pressed(egui::Key::Y)) {
-                // Yank (copy) current cell
+            } else if ctx.input(|i| i.key_pressed(egui::Key::Y) && !i.modifiers.ctrl) {
+                // Yank (copy) current cell - only if not part of Ctrl+Y combination
                 let formula = sheet[self.state.cursor_row][self.state.cursor_col]
                     .formula
                     .clone()
                     .unwrap_or_else(|| sheet[self.state.cursor_row][self.state.cursor_col].val.to_string());
-
+    
                 self.state.clipboard = Some(ClipboardContent::Cell {
                     row: self.state.cursor_row,
                     col: self.state.cursor_col,
                     value: formula,
                 });
-
+    
                 self.state.status_message = format!(
                     "Yanked cell {}{}",
                     column_name(self.state.cursor_col),
@@ -198,29 +290,58 @@ impl SpreadsheetApp {
                             // Paste range
                             let height = end_row - start_row + 1;
                             let width = end_col - start_col + 1;
-
+    
                             for i in 0..height {
                                 for j in 0..width {
                                     let target_row = self.state.cursor_row + i;
                                     let target_col = self.state.cursor_col + j;
-
+    
                                     if target_row < self.rows as usize && target_col < self.cols as usize {
                                         sheet[target_row][target_col].formula = Some(data[i][j].clone());
                                     }
                                 }
                             }
-
+    
                             self.state.status_message = format!(
                                 "Pasted range to {}{}",
                                 column_name(self.state.cursor_col),
                                 self.state.cursor_row + 1
                             );
                         }
-                        _ => {}
+                        ClipboardContent::Row { row: _, data } => {
+                            // Paste row data
+                            let cols = self.cols as usize;
+                            
+                            for (j, value) in data.iter().enumerate() {
+                                if j < cols {
+                                    sheet[self.state.cursor_row][j].formula = Some(value.clone());
+                                }
+                            }
+                            
+                            self.state.status_message = format!(
+                                "Pasted row to row {}",
+                                self.state.cursor_row + 1
+                            );
+                        }
+                        ClipboardContent::Column { col: _, data } => {
+                            // Paste column data
+                            let rows = self.rows as usize;
+                            
+                            for (i, value) in data.iter().enumerate() {
+                                if i < rows {
+                                    sheet[i][self.state.cursor_col].formula = Some(value.clone());
+                                }
+                            }
+                            
+                            self.state.status_message = format!(
+                                "Pasted column to column {}",
+                                column_name(self.state.cursor_col)
+                            );
+                        }
                     }
                 }
-            } else if ctx.input(|i| i.key_pressed(egui::Key::D)) {
-                // Delete current cell
+            } else if ctx.input(|i| i.key_pressed(egui::Key::D) && !i.modifiers.ctrl) {
+                // Delete current cell - only if not part of Ctrl+D combination
                 sheet[self.state.cursor_row][self.state.cursor_col].formula = None;
                 sheet[self.state.cursor_row][self.state.cursor_col].val = 0;
                 sheet[self.state.cursor_row][self.state.cursor_col].err = 0;
@@ -334,7 +455,7 @@ impl SpreadsheetApp {
             if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
                 let command = self.state.command_buffer.clone();
                 self.state.enter_normal_mode();
-
+    
                 match execute_command(&command, &mut self.state, &mut sheet, self.rows, self.cols) {
                     Ok(()) => {},
                     Err(message) => {
@@ -382,7 +503,7 @@ impl SpreadsheetApp {
                 if let Some((min_row, min_col, max_row, max_col)) = self.state.get_visual_selection() {
                     let height = max_row - min_row + 1;
                     let width = max_col - min_col + 1;
-
+    
                     let mut data = Vec::with_capacity(height);
                     for i in 0..height {
                         let mut row_data = Vec::with_capacity(width);
@@ -395,7 +516,7 @@ impl SpreadsheetApp {
                         }
                         data.push(row_data);
                     }
-
+    
                     self.state.clipboard = Some(ClipboardContent::Range {
                         start_row: min_row,
                         start_col: min_col,
@@ -403,7 +524,7 @@ impl SpreadsheetApp {
                         end_col: max_col,
                         data,
                     });
-
+    
                     self.state.status_message = format!(
                         "Yanked range {}{}:{}{}",
                         column_name(min_col),
@@ -411,7 +532,7 @@ impl SpreadsheetApp {
                         column_name(max_col),
                         max_row + 1
                     );
-
+    
                     self.state.enter_normal_mode();
                 }
             } else if ctx.input(|i| i.key_pressed(egui::Key::D)) {
@@ -424,7 +545,7 @@ impl SpreadsheetApp {
                             sheet[i][j].err = 0;
                         }
                     }
-
+    
                     self.state.status_message = format!(
                         "Deleted range {}{}:{}{}",
                         column_name(min_col),
@@ -440,7 +561,6 @@ impl SpreadsheetApp {
         // Evaluate sheet after changes
         evaluate_sheet(self.rows, self.cols, &mut sheet);
     }
-
     fn render_spreadsheet(&mut self, ui: &mut Ui) {
         let sheet = self.sheet.lock().unwrap();
         
@@ -490,6 +610,31 @@ impl SpreadsheetApp {
                                 None => false,
                             };
                             
+                            // Check if this cell is a search match
+                            let is_search_match = if let Some(ref pattern) = self.state.search_pattern {
+                                let cell_value = if let Some(ref formula) = sheet[row][col].formula {
+                                    formula.clone()
+                                } else {
+                                    sheet[row][col].val.to_string()
+                                };
+                                
+                                cell_value.contains(pattern)
+                            } else {
+                                false
+                            };
+                            
+                            // Check if this is the current search match
+                            let is_current_match = if let Some(idx) = self.state.current_match {
+                                if idx < self.state.search_matches.len() {
+                                    let (match_row, match_col) = self.state.search_matches[idx];
+                                    row == match_row && col == match_col
+                                } else {
+                                    false
+                                }
+                            } else {
+                                false
+                            };
+                            
                             let cell_value = if sheet[row][col].err != 0 {
                                 "ERR".to_string()
                             } else {
@@ -500,6 +645,10 @@ impl SpreadsheetApp {
                             
                             if is_cursor {
                                 text = text.background_color(Color32::LIGHT_BLUE);
+                            } else if is_current_match {
+                                text = text.background_color(Color32::GOLD);
+                            } else if is_search_match {
+                                text = text.background_color(Color32::LIGHT_YELLOW);
                             } else if is_selected {
                                 text = text.background_color(Color32::LIGHT_GREEN);
                             }
@@ -641,7 +790,279 @@ impl SpreadsheetApp {
                         });
                     }
                 }
+                fn delete_row(&mut self, row_index: usize, count: usize) {
+                    let mut sheet = self.sheet.lock().unwrap();
+                    let rows = self.rows as usize;
+                    let cols = self.cols as usize;
+                    
+                    // Store the deleted rows for potential formula adjustments
+                    let mut deleted_rows = Vec::new();
+                    for i in 0..count {
+                        if row_index + i < rows {
+                            deleted_rows.push(sheet[row_index + i].clone());
+                        }
+                    }
+                    
+                    // Shift rows up
+                    for i in row_index..rows - count {
+                        if i + count < rows {
+                            sheet[i] = sheet[i + count].clone();
+                        }
+                    }
+                    
+                    // Clear the bottom rows
+                    for i in rows - count..rows {
+                        for j in 0..cols {
+                            sheet[i][j].val = 0;
+                            sheet[i][j].formula = None;
+                            sheet[i][j].err = 0;
+                        }
+                    }
+                    
+                    // Adjust formulas in the remaining cells
+                    self.adjust_formulas_after_row_deletion(&mut sheet, row_index, count);
+                }
+                
+                fn copy_row(&mut self, row_index: usize, count: usize) {
+                    let sheet = self.sheet.lock().unwrap();
+                    let rows = self.rows as usize;
+                    let cols = self.cols as usize;
+                    
+                    if row_index >= rows {
+                        return;
+                    }
+                    
+                    // Create a vector to store the row data
+                    let mut data = Vec::new();
+                    
+                    // Copy the specified rows
+                    for i in 0..count {
+                        if row_index + i < rows {
+                            let mut row_data = Vec::new();
+                            for j in 0..cols {
+                                let formula = sheet[row_index + i][j].formula.clone()
+                                    .unwrap_or_else(|| sheet[row_index + i][j].val.to_string());
+                                row_data.push(formula);
+                            }
+                            data.push(row_data);
+                        }
+                    }
+                    
+                    // Store in clipboard
+                    self.state.clipboard = Some(ClipboardContent::Row {
+                        row: row_index,
+                        data: data.into_iter().flatten().collect(),
+                    });
+                }
+                
+                // Column operations
+                fn delete_column(&mut self, col_index: usize, count: usize) {
+                    let mut sheet = self.sheet.lock().unwrap();
+                    let rows = self.rows as usize;
+                    let cols = self.cols as usize;
+                    
+                    // Shift columns left
+                    for i in 0..rows {
+                        for j in col_index..cols - count {
+                            if j + count < cols {
+                                sheet[i][j] = sheet[i][j + count].clone();
+                            }
+                        }
+                        
+                        // Clear the rightmost columns
+                        for j in cols - count..cols {
+                            sheet[i][j].val = 0;
+                            sheet[i][j].formula = None;
+                            sheet[i][j].err = 0;
+                        }
+                    }
+                    
+                    // Adjust formulas in the remaining cells
+                    self.adjust_formulas_after_column_deletion(&mut sheet, col_index, count);
+                }
+                
+                fn copy_column(&mut self, col_index: usize, count: usize) {
+                    let sheet = self.sheet.lock().unwrap();
+                    let rows = self.rows as usize;
+                    let cols = self.cols as usize;
+                    
+                    if col_index >= cols {
+                        return;
+                    }
+                    
+                    // Create a vector to store the column data
+                    let mut data = Vec::new();
+                    
+                    // Copy the specified columns
+                    for j in 0..count {
+                        if col_index + j < cols {
+                            let mut col_data = Vec::new();
+                            for i in 0..rows {
+                                let formula = sheet[i][col_index + j].formula.clone()
+                                    .unwrap_or_else(|| sheet[i][col_index + j].val.to_string());
+                                col_data.push(formula);
+                            }
+                            data.push(col_data);
+                        }
+                    }
+                    
+                    // Store in clipboard
+                    self.state.clipboard = Some(ClipboardContent::Column {
+                        col: col_index,
+                        data: data.into_iter().flatten().collect(),
+                    });
+                }
+                
+                // Formula adjustment methods
+                fn adjust_formulas_after_row_deletion(&self, sheet: &mut Vec<Vec<cell>>, row_index: usize, count: usize) {
+                    let rows = self.rows as usize;
+                    let cols = self.cols as usize;
+                    
+                    // Iterate through all cells
+                    for i in 0..rows {
+                        for j in 0..cols {
+                            if let Some(ref formula) = sheet[i][j].formula.clone() {
+                                // Adjust the formula
+                                let adjusted_formula = self.adjust_cell_references_for_row_deletion(formula, row_index, count);
+                                sheet[i][j].formula = Some(adjusted_formula);
+                            }
+                        }
+                    }
+                }
+                
+                fn adjust_formulas_after_column_deletion(&self, sheet: &mut Vec<Vec<cell>>, col_index: usize, count: usize) {
+                    let rows = self.rows as usize;
+                    let cols = self.cols as usize;
+                    
+                    // Iterate through all cells
+                    for i in 0..rows {
+                        for j in 0..cols {
+                            if let Some(ref formula) = sheet[i][j].formula.clone() {
+                                // Adjust the formula
+                                let adjusted_formula = self.adjust_cell_references_for_column_deletion(formula, col_index, count);
+                                sheet[i][j].formula = Some(adjusted_formula);
+                            }
+                        }
+                    }
+                }
+                
+                fn adjust_cell_references_for_row_deletion(&self, formula: &str, row_index: usize, count: usize) -> String {
+                    // Use regex to find cell references like A1, B2, etc.
+                    let re = regex::Regex::new(r"([A-Z]+)(\d+)").unwrap();
+                    
+                    re.replace_all(formula, |caps: &regex::Captures| {
+                        let col_name = &caps[1];
+                        let row: usize = caps[2].parse().unwrap_or(0);
+                        
+                        // Adjust row references
+                        if row > row_index + count {
+                            // Reference is below deleted rows - move up
+                            format!("{}{}", col_name, row - count)
+                        } else if row > row_index {
+                            // Reference is to a deleted row - mark as error
+                            format!("ERROR_REF")
+                        } else {
+                            // Reference is above deleted rows - no change
+                            format!("{}{}", col_name, row)
+                        }
+                    }).to_string()
+                }
+                fn find_next_match(&mut self, forward: bool) -> bool {
+                    if self.state.search_matches.is_empty() {
+                        return false;
+                    }
+                    
+                    let (current_row, current_col) = (self.state.cursor_row, self.state.cursor_col);
+                    
+                    if forward {
+                        // Find the next match after current position
+                        let next_match = self.state.search_matches.iter().position(|&(row, col)| {
+                            (row > current_row) || (row == current_row && col > current_col)
+                        });
+                        
+                        if let Some(idx) = next_match {
+                            self.state.current_match = Some(idx);
+                        } else if !self.state.search_matches.is_empty() {
+                            // Wrap around to the first match
+                            self.state.current_match = Some(0);
+                        }
+                    } else {
+                        // Find the previous match before current position
+                        let prev_matches: Vec<_> = self.state.search_matches.iter()
+                            .enumerate()
+                            .filter(|&(_, &(row, col))| {
+                                (row < current_row) || (row == current_row && col < current_col)
+                            })
+                            .collect();
+                        
+                        if !prev_matches.is_empty() {
+                            // Get the last match before current position
+                            self.state.current_match = Some(prev_matches.last().unwrap().0);
+                        } else if !self.state.search_matches.is_empty() {
+                            // Wrap around to the last match
+                            self.state.current_match = Some(self.state.search_matches.len() - 1);
+                        }
+                    }
+                    
+                    if let Some(idx) = self.state.current_match {
+                        let (row, col) = self.state.search_matches[idx];
+                        self.state.cursor_row = row;
+                        self.state.cursor_col = col;
+                        
+                        // Ensure the cursor is visible
+                        if self.state.cursor_row < self.state.row_offset {
+                            self.state.row_offset = self.state.cursor_row;
+                        } else if self.state.cursor_row >= self.state.row_offset + self.visible_rows {
+                            self.state.row_offset = self.state.cursor_row.saturating_sub(self.visible_rows / 2);
+                        }
+                        
+                        if self.state.cursor_col < self.state.col_offset {
+                            self.state.col_offset = self.state.cursor_col;
+                        } else if self.state.cursor_col >= self.state.col_offset + self.visible_cols {
+                            self.state.col_offset = self.state.cursor_col.saturating_sub(self.visible_cols / 2);
+                        }
+                        
+                        return true;
+                    }
+                    
+                    false
+                }
+                
+                fn adjust_cell_references_for_column_deletion(&self, formula: &str, col_index: usize, count: usize) -> String {
+                    // Use regex to find cell references like A1, B2, etc.
+                    let re = regex::Regex::new(r"([A-Z]+)(\d+)").unwrap();
+                    
+                    re.replace_all(formula, |caps: &regex::Captures| {
+                        let col_name = &caps[1];
+                        let row = &caps[2];
+                        
+                        // Convert column name to index
+                        let col = column_name_to_index(col_name);
+                        
+                        // Adjust column references
+                        if col > col_index + count {
+                            // Reference is to the right of deleted columns - move left
+                            format!("{}{}", column_name(col - count), row)
+                        } else if col > col_index {
+                            // Reference is to a deleted column - mark as error
+                            format!("ERROR_REF")
+                        } else {
+                            // Reference is to the left of deleted columns - no change
+                            format!("{}{}", col_name, row)
+                        }
+                    }).to_string()
+                }
             }
+            
+            // Helper function to convert column name to index
+            fn column_name_to_index(name: &str) -> usize {
+                let mut index = 0;
+                for c in name.chars() {
+                    index = index * 26 + (c as usize - 'A' as usize + 1);
+                }
+                index - 1 // Convert to 0-indexed
+            }
+            
             
             impl App for SpreadsheetApp {
                 fn update(&mut self, ctx: &egui::Context, frame: &mut Frame) {

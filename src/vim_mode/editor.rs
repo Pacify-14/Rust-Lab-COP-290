@@ -42,6 +42,13 @@ pub struct EditorState {
     pub col_offset: usize,
     /// Current cell formula being edited in insert mode
     pub edit_buffer: String,
+    pub search_pattern: Option<String>,
+    /// Direction of the search (true for forward, false for backward)
+    pub search_forward: bool,
+    /// Last search matches
+    pub search_matches: Vec<(usize, usize)>,
+    /// Current match index
+    pub current_match: Option<usize>,
 }
 
 /// Represents content that can be stored in the clipboard.
@@ -98,6 +105,10 @@ impl EditorState {
             row_offset: 0, // Explicitly set to 0
             col_offset: 0, // Explicitly set to 0
             edit_buffer: String::new(),
+            search_pattern: None,
+        search_forward: true,
+        search_matches: Vec::new(),
+        current_match: None,
         }
     }
     pub fn reset_view(&mut self) {
