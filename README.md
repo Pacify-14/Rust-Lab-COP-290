@@ -9,7 +9,7 @@ A powerful spreadsheet editor with Vim-like keybindings and commands, offering a
 
 - **Vim-style Movement**: Navigate using `h`, `j`, `k`, `l` keys
 - **Jump Commands**: 
-  - `gg` - Go to first row
+  - `g` - Go to first row
   - `G` - Go to last row
   - `0` - Go to first column
   - `$` - Go to last column
