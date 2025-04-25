@@ -171,6 +171,8 @@ A powerful spreadsheet editor with Vim-like keybindings and commands, offering a
 
 ## For make docs
 `sudo apt install texlive-latex-base`
+`sudo apt install texlive-latex-extra`
+`sudo apt install etoolbox`
 
 ## License
 
