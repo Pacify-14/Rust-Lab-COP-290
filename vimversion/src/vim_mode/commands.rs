@@ -5,9 +5,12 @@ use std::fs::File;
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::Path;
 
-use crate::vim_mode::editor::{EditorState, column_name, formula_to_string, parse_cell_reference};
-use crate::{CellRef, Formula, HashSet, cell, evaluate_cell, get_col_index, parse_formula};
+use crate::vim_mode::editor::{column_name, formula_to_string, parse_cell_reference, EditorState};
+use crate::{cell, evaluate_cell, get_col_index, parse_formula, CellRef, Formula, HashSet};
 
+/// Executes a command entered in command mode.
+/// Executes a command entered in command mode.
+/// Executes a command entered in command mode.
 /// Executes a command entered in command mode.
 pub fn execute_command(
     command: &str,
@@ -16,6 +19,16 @@ pub fn execute_command(
     rows: i32,
     cols: i32,
 ) -> Result<(), String> {
+    // Handle search commands that don't start with ':'
+    if command.starts_with('/') {
+        let pattern = &command[1..];
+        return search_sheet(state, sheet, pattern, true, rows, cols);
+    } else if command.starts_with('?') {
+        let pattern = &command[1..];
+        return search_sheet(state, sheet, pattern, false, rows, cols);
+    }
+
+    // Handle commands that start with ':'
     let cmd = command.trim_start_matches(':');
 
     // Quit commands
@@ -34,18 +47,21 @@ pub fn execute_command(
         let filename = parts.get(1).map(|s| *s).unwrap_or("spreadsheet.ss");
 
         match save_file(sheet, filename, rows, cols) {
-            Ok(_) => return Ok(()),
+            Ok(_) => {
+                state.status_message = format!("Saved to {}", filename);
+                return Ok(());
+            }
             Err(e) => return Err(format!("Error saving: {}", e)),
         }
-    } else if command.starts_with("e ") || command == "e" {
+    } else if cmd.starts_with("e ") || cmd == "e" {
         // Edit command - clear sheet and load a file
         let current_dir = std::env::current_dir()
             .map_err(|e| format!("Failed to get current directory: {}", e))?;
         state.status_message = format!("Current directory: {}", current_dir.display());
-        let filename = if command == "e" {
+        let filename = if cmd == "e" {
             return Err("No filename specified".to_string());
         } else {
-            &command[2..]
+            &cmd[2..]
         };
 
         // Clear the current sheet
@@ -57,7 +73,7 @@ pub fn execute_command(
             }
         }
 
-        // Load the specified file using load_file instead of load_sheet
+        // Load the specified file
         match load_file(sheet, filename, rows, cols) {
             Ok(_) => {
                 state.reset_view();
@@ -89,54 +105,16 @@ pub fn execute_command(
             Err(e) => return Err(format!("Error loading file: {}", e)),
         }
     }
-    // Search and replace
+    // Search and replace commands
     else if cmd.starts_with("s/") {
-        let parts: Vec<&str> = cmd[2..].splitn(3, '/').collect();
-        if parts.len() >= 2 {
-            let search = parts[0];
-            let replace = parts[1];
-            let global = parts.get(2).map(|s| *s == "g").unwrap_or(false);
-
-            let count = search_and_replace(sheet, search, replace, global, rows, cols);
-            return Ok(());
-        }
-    }
-    // Jump to cell
-    else if let Some((row, col)) = parse_cell_reference(cmd) {
-        if row < rows as usize && col < cols as usize {
-            state.cursor_row = row;
-            state.cursor_col = col;
-
-            // Adjust viewport if necessary
-            if row < state.row_offset || row >= state.row_offset + 20 {
-                state.row_offset = row.saturating_sub(5);
-            }
-
-            if col < state.col_offset || col >= state.col_offset + 20 {
-                state.col_offset = col.saturating_sub(5);
-            }
-
-            return Ok(());
-        } else {
-            return Err(format!("Cell reference out of bounds: {}", cmd));
-        }
-    }
-    // Batch formula assignment
-    else if cmd.starts_with("i in ") {
-        return execute_batch_formula(cmd, sheet, rows, cols);
-    }
-    // Help command
-    else if cmd == "help" {
-        return Err("Available commands:\n:q, :quit - Quit\n:w [filename] - Save\n:wq - Save and quit\n:e, :edit [filename] - Open file\n:s/search/replace[/g] - Search and replace\n:A1 - Jump to cell\n:i in range: formula - Batch formula assignment".to_string());
+        // Replace in current cell only
+        return replace_in_current_cell(state, sheet, cmd);
     } else if cmd.starts_with("%s/") {
+        // Replace in all cells
         return search_and_replace_vim(state, sheet, cmd, rows, cols);
-    } else if command.starts_with('/') {
-        let pattern = &command[1..];
-        return search_sheet(state, sheet, pattern, true, rows, cols);
-    } else if command.starts_with('?') {
-        let pattern = &command[1..];
-        return search_sheet(state, sheet, pattern, false, rows, cols);
-    } else if cmd == "n" {
+    }
+    // Navigation commands
+    else if cmd == "n" {
         if state.search_pattern.is_none() {
             return Err("No previous search".to_string());
         }
@@ -157,8 +135,186 @@ pub fn execute_command(
 
         return Ok(());
     }
+    // Batch formula commands
+    else if cmd.starts_with("i in ") {
+        return execute_batch_formula(cmd, sheet, rows, cols);
+    }
+    // Jump to cell
+    else if let Some((row, col)) = parse_cell_reference(cmd) {
+        if row < rows as usize && col < cols as usize {
+            state.cursor_row = row;
+            state.cursor_col = col;
+
+            // Adjust viewport to ensure the cursor is fully visible
+            if row < state.row_offset {
+                state.row_offset = row;
+            } else if row >= state.row_offset + 20 {
+                state.row_offset = row
+                    .saturating_sub(10)
+                    .min((rows as usize).saturating_sub(20));
+            }
+
+            if col < state.col_offset {
+                state.col_offset = col;
+            } else if col >= state.col_offset + 10 {
+                state.col_offset = col
+                    .saturating_sub(5)
+                    .min((cols as usize).saturating_sub(10));
+            }
+
+            return Ok(());
+        } else {
+            return Err(format!("Cell reference out of bounds: {}", cmd));
+        }
+    }
+    // Help command
+    else if cmd == "help" {
+        return Err("Available commands:\n:q, :quit - Quit\n:w [filename] - Save\n:wq - Save and quit\n:e, :edit [filename] - Open file\n:s/old/new/ - Replace in current cell\n:s/old/new/g - Replace all in current cell\n:%s/old/new/g - Replace all in all cells\n/pattern - Search forward\n?pattern - Search backward\nn - Next match\nN - Previous match\n:A1 - Jump to cell\n:i in range: formula - Batch formula assignment".to_string());
+    }
 
     Err(format!("Unknown command: {}", cmd))
+}
+
+/// Replaces text in the current cell
+fn replace_in_current_cell(
+    state: &mut EditorState,
+    sheet: &mut Vec<Vec<cell>>,
+    cmd: &str,
+) -> Result<(), String> {
+    // Parse the search and replace command (s/pattern/replacement/[g])
+    let parts: Vec<&str> = cmd.split('/').collect();
+    if parts.len() < 3 {
+        return Err(
+            "Invalid search and replace format. Use :s/pattern/replacement/[g]".to_string(),
+        );
+    }
+
+    let pattern = parts[1];
+    let replacement = parts[2];
+    let global = parts.len() > 3 && parts[3].contains('g');
+
+    if pattern.is_empty() {
+        return Err("Empty search pattern".to_string());
+    }
+
+    let row = state.cursor_row;
+    let col = state.cursor_col;
+
+    // Get the current cell's formula or value
+    let cell_value = if let Some(ref formula) = sheet[row][col].formula {
+        formula_to_string(formula)
+    } else {
+        sheet[row][col].val.to_string()
+    };
+
+    // Check if the pattern exists in the cell
+    if !cell_value.contains(pattern) {
+        return Err(format!("Pattern not found in current cell: {}", pattern));
+    }
+
+    // Perform the replacement
+    let new_value = if global {
+        cell_value.replace(pattern, replacement)
+    } else {
+        cell_value.replacen(pattern, replacement, 1)
+    };
+
+    // Update the cell with the new value
+    if sheet[row][col].formula.is_some() {
+        // Try to parse the new value as a formula
+        match parse_formula(&new_value) {
+            Ok(formula) => {
+                sheet[row][col].formula = Some(formula);
+                state.status_message = format!("Replaced in cell {}{}", column_name(col), row + 1);
+            }
+            Err(_) => {
+                return Err(format!("Invalid formula after replacement: {}", new_value));
+            }
+        }
+    } else {
+        // Try to parse as a number
+        match new_value.parse::<i32>() {
+            Ok(val) => {
+                sheet[row][col].val = val;
+                state.status_message = format!("Replaced in cell {}{}", column_name(col), row + 1);
+            }
+            Err(_) => {
+                return Err(format!("Invalid number after replacement: {}", new_value));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Performs search on the sheet and updates the search matches.
+
+/// Finds the next or previous match based on search direction
+
+/// Replaces text in the current cell
+
+/// Replaces text in all cells
+fn replace_in_all_cells(
+    state: &mut EditorState,
+    sheet: &mut Vec<Vec<cell>>,
+    cmd: &str,
+    rows: i32,
+    cols: i32,
+) -> Result<(), String> {
+    // Parse the search and replace command (%s/pattern/replacement/[g])
+    let cmd = cmd.trim_start_matches('%');
+    let parts: Vec<&str> = cmd.split('/').collect();
+    if parts.len() < 3 {
+        return Err(
+            "Invalid search and replace format. Use :%s/pattern/replacement/[g]".to_string(),
+        );
+    }
+
+    let pattern = parts[1];
+    let replacement = parts[2];
+    let global = parts.len() > 3 && parts[3].contains('g');
+
+    if pattern.is_empty() {
+        return Err("Empty search pattern".to_string());
+    }
+
+    let mut count = 0;
+
+    // Perform the replacement in all cells
+    for row in 0..(rows as usize) {
+        for col in 0..(cols as usize) {
+            if let Some(ref formula) = sheet[row][col].formula.clone() {
+                let formula_str = formula_to_string(formula);
+                if formula_str.contains(pattern) {
+                    let new_formula_str = if global {
+                        formula_str.replace(pattern, replacement)
+                    } else {
+                        formula_str.replacen(pattern, replacement, 1)
+                    };
+
+                    if new_formula_str != formula_str {
+                        // Try to parse the new formula
+                        match parse_formula(&new_formula_str) {
+                            Ok(new_formula) => {
+                                sheet[row][col].formula = Some(new_formula);
+                                count += 1;
+                            }
+                            Err(_) => {
+                                // If parsing fails, leave the formula unchanged
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if count == 0 {
+        return Err(format!("Pattern not found: {}", pattern));
+    }
+
+    state.status_message = format!("Replaced {} occurrences", count);
+    Ok(())
 }
 
 /// Saves the spreadsheet to a file.
@@ -491,12 +647,12 @@ fn execute_batch_formula(
         let end: usize = caps[2]
             .parse()
             .map_err(|_| "Invalid range end".to_string())?;
-        let col_letter = &caps[3];
+        let target_col_letter = &caps[3];
         let formula_template = &caps[4];
 
-        let col = get_col_index(col_letter) as usize;
-        if col >= cols as usize {
-            return Err(format!("Column {} is out of bounds", col_letter));
+        let target_col = get_col_index(target_col_letter) as usize;
+        if target_col >= cols as usize {
+            return Err(format!("Column {} is out of bounds", target_col_letter));
         }
 
         let mut count = 0;
@@ -506,86 +662,73 @@ fn execute_batch_formula(
             }
 
             // Replace 'i' in the formula with the current index
-            let formula_str = formula_template.replace("i", &i.to_string());
+            let mut formula_str = formula_template.to_string();
+
+            // Replace all occurrences of column letters followed by 'i'
+            for col_letter in 'A'..='Z' {
+                let pattern = format!("{}i", col_letter);
+                let replacement = format!("{}{}", col_letter, i);
+                formula_str = formula_str.replace(&pattern, &replacement);
+            }
 
             // Try to parse the formula string
             match parse_formula(&formula_str) {
                 Ok(formula) => {
-                    // Set the formula for the cell
-                    sheet[(i - 1) as usize][col].formula = Some(formula);
+                    // Set the formula for the cell (i-1 because spreadsheet is 0-indexed)
+                    sheet[(i - 1) as usize][target_col].formula = Some(formula);
                     count += 1;
                 }
-                Err(_) => {
-                    return Err(format!("Invalid formula: {}", formula_str));
+                Err(e) => {
+                    return Err(format!("Invalid formula '{}': {:?}", formula_str, e));
                 }
             }
         }
 
-        return Ok(());
+        if count > 0 {
+            return Ok(());
+        }
     }
 
-    // Try alternative syntax: "i,j in 1..5,1..5: Ci,j = Ai,j + Bi,j"
-    let re2 =
-        Regex::new(r"i,j in (\d+)\.\.(\d+),(\d+)\.\.(\d+): ([A-Z])i,([A-Z])j = (.+)").unwrap();
+    // Try alternative syntax for range formulas: "i in 1..10: Di = AVG(Ai:Ci)"
+    let re2 = Regex::new(r"i in (\d+)\.\.(\d+): ([A-Z])i = ([A-Z]+)$$([A-Z])i:([A-Z])i$$").unwrap();
     if let Some(caps) = re2.captures(cmd) {
-        let row_start: usize = caps[1]
+        let start: usize = caps[1]
             .parse()
-            .map_err(|_| "Invalid row range start".to_string())?;
-        let row_end: usize = caps[2]
+            .map_err(|_| "Invalid range start".to_string())?;
+        let end: usize = caps[2]
             .parse()
-            .map_err(|_| "Invalid row range end".to_string())?;
-        let col_start: usize = caps[3]
-            .parse()
-            .map_err(|_| "Invalid column range start".to_string())?;
-        let col_end: usize = caps[4]
-            .parse()
-            .map_err(|_| "Invalid column range end".to_string())?;
+            .map_err(|_| "Invalid range end".to_string())?;
+        let target_col_letter = &caps[3];
+        let func_name = &caps[4];
+        let start_col_letter = &caps[5];
+        let end_col_letter = &caps[6];
 
-        let target_row_col = &caps[5];
-        let target_col_col = &caps[6];
-        let formula_template = &caps[7];
+        let target_col = get_col_index(target_col_letter) as usize;
+        if target_col >= cols as usize {
+            return Err(format!("Column {} is out of bounds", target_col_letter));
+        }
 
         let mut count = 0;
-        for i in row_start..=row_end {
+        for i in start..=end {
             if i > rows as usize {
                 break;
             }
 
-            for j in col_start..=col_end {
-                // Calculate target cell coordinates
-                let row_idx = i - 1; // Convert to 0-indexed
+            // Create a range formula
+            let formula_str = format!(
+                "{}({}{}:{}{})",
+                func_name, start_col_letter, i, end_col_letter, i
+            );
 
-                // For the column, we need to replace 'i' in the column letter if present
-                let col_str = if target_col_col.contains('i') {
-                    target_col_col.replace('i', &i.to_string())
-                } else {
-                    format!("{}{}", target_col_col, j)
-                };
-
-                let col_idx = match parse_cell_reference(&format!("{}{}", col_str, 1)) {
-                    Some((_, col)) => col,
-                    None => continue, // Skip invalid column
-                };
-
-                if row_idx >= rows as usize || col_idx >= cols as usize {
-                    continue; // Skip out of bounds
+            // Try to parse the formula string
+            match parse_formula(&formula_str) {
+                Ok(formula) => {
+                    // Set the formula for the cell (i-1 because spreadsheet is 0-indexed)
+                    sheet[(i - 1) as usize][target_col].formula = Some(formula);
+                    count += 1;
                 }
-
-                // Replace 'i' and 'j' in the formula
-                let formula_str = formula_template
-                    .replace("i", &i.to_string())
-                    .replace("j", &j.to_string());
-
-                // Try to parse the formula string
-                match parse_formula(&formula_str) {
-                    Ok(formula) => {
-                        // Set the formula for the cell
-                        sheet[row_idx][col_idx].formula = Some(formula);
-                        count += 1;
-                    }
-                    Err(_) => {
-                        return Err(format!("Invalid formula: {}", formula_str));
-                    }
+                Err(e) => {
+                    return Err(format!("Invalid formula '{}': {:?}", formula_str, e));
                 }
             }
         }

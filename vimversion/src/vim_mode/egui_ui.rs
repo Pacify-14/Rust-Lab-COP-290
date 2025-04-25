@@ -7,9 +7,9 @@ use std::sync::{Arc, Mutex};
 
 use crate::vim_mode::commands::{execute_command, find_next_match};
 use crate::vim_mode::editor::{
-    ClipboardContent, EditorState, Mode, column_name, formula_to_string, parse_cell_reference,
+    column_name, formula_to_string, parse_cell_reference, ClipboardContent, EditorState, Mode,
 };
-use crate::{Formula, HashSet, cell, evaluate_cell, parse_formula};
+use crate::{cell, evaluate_cell, parse_formula, Formula, HashSet};
 
 const CELL_SIZE: f32 = 80.0;
 const HEADER_SIZE: f32 = 30.0;
@@ -103,16 +103,18 @@ impl SpreadsheetApp {
             need_to_delete_row = true;
         }
 
-        if ctx.input(|i| i.key_pressed(egui::Key::Y) && i.modifiers.ctrl) {
-            if ctx.input(|i| i.key_pressed(egui::Key::R)) {
-                need_to_copy_row = true;
-            }
+        if ctx.input(|i| i.key_pressed(egui::Key::M) && i.modifiers.ctrl) {
+            // Set a flag or timer to detect if R is pressed next
+
+            need_to_copy_row = true;
         }
 
+        // Check for Ctrl+C to delete current column
         if ctx.input(|i| i.key_pressed(egui::Key::C) && i.modifiers.ctrl) {
             need_to_delete_column = true;
         }
 
+        // Check for Ctrl+S to yank (copy) current column
         if ctx.input(|i| i.key_pressed(egui::Key::S) && i.modifiers.ctrl) {
             need_to_copy_column = true;
         }
@@ -217,11 +219,35 @@ impl SpreadsheetApp {
             } else if ctx.input(|i| i.key_pressed(egui::Key::V)) {
                 self.state.enter_visual_mode();
                 self.state.status_message = String::from("-- VISUAL --");
+            } else if ctx.input(|i| i.key_pressed(egui::Key::H) && i.modifiers.ctrl) {
+                let visible_cols = self.visible_cols;
+                self.state.col_offset = self.state.col_offset.saturating_sub(visible_cols);
+                self.state.cursor_col = self.state.col_offset;
+
+                // Update status message
+                self.state.status_message = String::from("Page left");
             } else if ctx.input(|i| i.key_pressed(egui::Key::H)) {
                 if self.state.cursor_col > 0 {
                     self.state.cursor_col -= 1;
                     if self.state.cursor_col < self.state.col_offset {
                         self.state.col_offset = self.state.cursor_col;
+                    }
+                }
+            } else if ctx.input(|i| i.key_pressed(egui::Key::L) && i.modifiers.ctrl) {
+                let visible_cols = self.visible_cols;
+                let new_offset =
+                    (self.state.col_offset + visible_cols).min(self.cols as usize - visible_cols);
+
+                self.state.col_offset = new_offset;
+                self.state.cursor_col = self.state.col_offset;
+
+                // Update status message
+                self.state.status_message = String::from("Page right");
+            } else if ctx.input(|i| i.key_pressed(egui::Key::L)) {
+                if self.state.cursor_col + 1 < self.cols as usize {
+                    self.state.cursor_col += 1;
+                    if self.state.cursor_col >= self.state.col_offset + self.visible_cols {
+                        self.state.col_offset += 1;
                     }
                 }
             } else if ctx.input(|i| i.key_pressed(egui::Key::J)) {
@@ -236,13 +262,6 @@ impl SpreadsheetApp {
                     self.state.cursor_row -= 1;
                     if self.state.cursor_row < self.state.row_offset {
                         self.state.row_offset = self.state.cursor_row;
-                    }
-                }
-            } else if ctx.input(|i| i.key_pressed(egui::Key::L)) {
-                if self.state.cursor_col + 1 < self.cols as usize {
-                    self.state.cursor_col += 1;
-                    if self.state.cursor_col >= self.state.col_offset + self.visible_cols {
-                        self.state.col_offset += 1;
                     }
                 }
             } else if ctx.input(|i| i.key_pressed(egui::Key::Y) && !i.modifiers.ctrl) {
@@ -422,7 +441,7 @@ impl SpreadsheetApp {
                     column_name(self.state.cursor_col),
                     self.state.cursor_row + 1
                 );
-            } else if ctx.input(|i| i.key_pressed(egui::Key::G) && i.modifiers.shift) {
+            } else if ctx.input(|i| i.key_pressed(egui::Key::Z)) {
                 // Go to last row
                 self.state.cursor_row = (self.rows - 1) as usize;
                 if self.state.cursor_row >= self.state.row_offset + self.visible_rows {
@@ -474,15 +493,8 @@ impl SpreadsheetApp {
                 // Update status message
                 self.state.status_message = String::from("Page right");
             }
-            // Page left (Ctrl+H)
-            else if ctx.input(|i| i.key_pressed(egui::Key::H) && i.modifiers.ctrl) {
-                let visible_cols = self.visible_cols;
-                self.state.col_offset = self.state.col_offset.saturating_sub(visible_cols);
-                self.state.cursor_col = self.state.col_offset;
 
-                // Update status message
-                self.state.status_message = String::from("Page left");
-            }
+            // Page left (Ctrl+H)
         }
 
         // Insert mode key handling
@@ -541,7 +553,14 @@ impl SpreadsheetApp {
 
         // Visual mode key handling
         if let Mode::Visual { .. } = self.state.mode {
-            if ctx.input(|i| i.key_pressed(egui::Key::H)) {
+            if ctx.input(|i| i.key_pressed(egui::Key::H) && i.modifiers.ctrl) {
+                let visible_cols = self.visible_cols;
+                self.state.col_offset = self.state.col_offset.saturating_sub(visible_cols);
+                self.state.cursor_col = self.state.col_offset;
+
+                // Update status message
+                self.state.status_message = String::from("Page left");
+            } else if ctx.input(|i| i.key_pressed(egui::Key::H)) {
                 if self.state.cursor_col > 0 {
                     self.state.cursor_col -= 1;
                     if self.state.cursor_col < self.state.col_offset {
@@ -562,6 +581,16 @@ impl SpreadsheetApp {
                         self.state.row_offset = self.state.cursor_row;
                     }
                 }
+            } else if ctx.input(|i| i.key_pressed(egui::Key::L) && i.modifiers.ctrl) {
+                let visible_cols = self.visible_cols;
+                let new_offset =
+                    (self.state.col_offset + visible_cols).min(self.cols as usize - visible_cols);
+
+                self.state.col_offset = new_offset;
+                self.state.cursor_col = self.state.col_offset;
+
+                // Update status message
+                self.state.status_message = String::from("Page right");
             } else if ctx.input(|i| i.key_pressed(egui::Key::L)) {
                 if self.state.cursor_col + 1 < self.cols as usize {
                     self.state.cursor_col += 1;

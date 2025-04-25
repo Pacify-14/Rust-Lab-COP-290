@@ -1,6 +1,6 @@
 //! Editor state and mode handling for the Vim-like interface.
 use crate::HashSet;
-use crate::{CellRef, Formula, cell, evaluate_cell, evaluate_formula, parse_formula};
+use crate::{cell, evaluate_cell, evaluate_formula, parse_formula, CellRef, Formula};
 use egui::ViewportBuilder;
 use std::process;
 use std::sync::{Arc, Mutex};
@@ -316,12 +316,7 @@ pub fn run_vim_interface(rows: i32, cols: i32) {
     let sheet = Arc::new(Mutex::new(sheet));
 
     // Check if we should use egui or terminal UI
-    if true {
-        // Always use egui for now
-        run_egui_interface(rows, cols, sheet);
-    } else {
-        run_terminal_interface(rows, cols, sheet);
-    }
+    run_egui_interface(rows, cols, sheet);
 }
 
 /// Runs the egui-based interface

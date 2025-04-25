@@ -11,9 +11,9 @@ use std::io::{self, Write};
 
 use crate::vim_mode::commands::execute_command;
 use crate::vim_mode::editor::{
-    EditorState, Mode, column_name, formula_to_string, parse_cell_reference,
+    column_name, formula_to_string, parse_cell_reference, EditorState, Mode,
 };
-use crate::{Formula, HashSet, cell, evaluate_cell, get_col_index, parse_formula};
+use crate::{cell, evaluate_cell, get_col_index, parse_formula, Formula, HashSet};
 
 /// Initializes the terminal for the Vim-like interface.
 pub fn init_terminal() -> io::Result<()> {
