@@ -164,6 +164,10 @@ A powerful spreadsheet editor with Vim-like keybindings and commands, offering a
 | `env -u WAYLAND_DISPLAY ./vimversion/target/release/spreadsheet --vim <rows> <cols>` or `./vimversion/target/release/spreadsheet --vim <rows> <cols>` | Run Vim-like Spreadsheet Binary |
 | `make vimmode-run` | Build and run Vim-like spreadsheet automatically with default size 100x100 |
 | `make clean` | Remove all build artifacts |
+| `make coverage` | Testing coverage |
+| `make test` | Running tests |
+| `make docs` | Generating docs |
+| `make ext1` | Running extensions |
 
 ## For make docs
 `sudo apt install texlive-latex-base`
