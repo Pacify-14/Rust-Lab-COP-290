@@ -45,10 +45,10 @@ vimmode-run: vimmode
 # Extension target
 ext1: clean
 	cd $(VIM_DIR) && $(CARGO) build --release
-	env -u WAYLAND_DISPLAY $(VIM_BIN) --vim 1000 1000
+	env -u WAYLAND_DISPLAY $(VIM_BIN) --vim 999 1000
 
 ext1-run: ext1
-	env -u WAYLAND_DISPLAY $(VIM_BIN) --vim 1000 1000
+	env -u WAYLAND_DISPLAY $(VIM_BIN) --vim 999 1000
 
 # Compile the LaTeX report
 docs:
