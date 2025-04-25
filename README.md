@@ -10,7 +10,7 @@ A powerful spreadsheet editor with Vim-like keybindings and commands, offering a
 - **Vim-style Movement**: Navigate using `h`, `j`, `k`, `l` keys
 - **Jump Commands**: 
   - `g` - Go to first row
-  - `G` - Go to last row
+  - `Z` - Go to last row
   - `0` - Go to first column
   - `$` - Go to last column
 - **Page Navigation**:
@@ -40,7 +40,6 @@ A powerful spreadsheet editor with Vim-like keybindings and commands, offering a
     - `=AVG(A1:A10)` - Calculate average
     - `=MAX(A1:B2)` - Find maximum value
     - `=MIN(A1:B2)` - Find minimum value
-    - `=SUM(A1:B2)` - Calculate sum
     - `=STDDEV(B1:B10)` - Calculate standard deviation
     
   - Batch formula assignment: `:i in 1..10: Ai = Bi + 1`
@@ -55,19 +54,16 @@ A powerful spreadsheet editor with Vim-like keybindings and commands, offering a
 
 - **Row/Column Operations**:
   - `Ctrl+R` - Delete current row
-  - `Ctrl+Y` then `R` - Yank (copy) current row
+  - `Ctrl+M` - Yank (copy) current row
   - `Ctrl+C` - Delete current column
   - `Ctrl+S` - Yank (copy) current column
 
-### Search and Replace
+### Search
 
 - `/pattern` - Search forward for pattern
 - `?pattern` - Search backward for pattern
 - `n` - Go to next match
-- `N` - Go to previous match
-- `:s/old/new/` - Replace first occurrence in current cell
-- `:s/old/new/g` - Replace all occurrences in current cell
-- `:%s/old/new/g` - Replace all occurrences in all cells
+
 
 ### File Operations
 
@@ -80,7 +76,7 @@ A powerful spreadsheet editor with Vim-like keybindings and commands, offering a
 ### Other Commands
 
 - `:q` or `:quit` - Quit the application
-- `:help` - Display help information
+
 
 ## Command Reference
 
@@ -90,7 +86,7 @@ A powerful spreadsheet editor with Vim-like keybindings and commands, offering a
 |---------|-------------|
 | `h`, `j`, `k`, `l` | Move left, down, up, right |
 | `g` | Go to first row |
-| `G` | Go to last row |
+| `Z` | Go to last row |
 | `0` | Go to first column |
 | `$` | Go to last column |
 | `:A1` | Jump to cell A1 |
@@ -121,8 +117,8 @@ A powerful spreadsheet editor with Vim-like keybindings and commands, offering a
 | Command | Description |
 |---------|-------------|
 | `:i in 1..10: Ai = Bi + 1` | Set formulas for cells A1 to A10 |
-| `:i in 1..10: Di = AVERAGE(Ai:Ci)` | Computing Average and other functionalities |
-| `:i in 1..10: Ei = SUM(Ai:Di)` | Computing Sum across rows |
+| `:i in 1..10: Di = AVG(Ai:Ci)` | Computing Average and other functionalities |
+| `:i in 1..10: Ei = Ai + Di` | Computing Sum across rows |
 
 ### Search Commands
 
@@ -131,10 +127,7 @@ A powerful spreadsheet editor with Vim-like keybindings and commands, offering a
 | `/pattern` | Search forward for pattern |
 | `?pattern` | Search backward for pattern |
 | `n` | Go to next match |
-| `N` | Go to previous match |
-| `:s/old/new/` | Replace in current cell |
-| `:s/old/new/g` | Replace all in current cell |
-| `:%s/old/new/g` | Replace all in all cells |
+
 
 ### File Commands
 
@@ -160,6 +153,22 @@ A powerful spreadsheet editor with Vim-like keybindings and commands, offering a
 3. Run with `cargo run --release`
 4. Press `:help` for command reference
 
+## Using make 
+
+| Command | Description |
+|---------|-------------|
+| `make` | Clean and build normal spreadsheet binary |
+| `./target/release/spreadsheet <rows> <columns>` | After building, run the binary manually |
+| `make run` | Build and run normal spreadsheet with size 999x18278 |
+| `make vimmode` | Build Vim-like spreadsheet binary in `vimversion` directory |
+| `env -u WAYLAND_DISPLAY ./vimversion/target/release/spreadsheet --vim <rows> <cols>` or `./vimversion/target/release/spreadsheet --vim <rows> <cols>` | Run Vim-like Spreadsheet Binary |
+| `make vimmode-run` | Build and run Vim-like spreadsheet automatically with default size 100x100 |
+| `make clean` | Remove all build artifacts |
+
+## For make docs
+`sudo apt install texlive-latex-base`
+
 ## License
 
 [MIT License](LICENSE)
+

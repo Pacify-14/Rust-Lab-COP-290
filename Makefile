@@ -11,7 +11,7 @@ VIM_DIR := vimversion
 VIM_BUILD_DIR := $(VIM_DIR)/target/release
 VIM_BIN := $(VIM_BUILD_DIR)/$(BIN_NAME)
 
-.PHONY: all build run clean vimmode vimmode-run
+.PHONY: all build run clean vimmode vimmode-run ext1 ext1-run docs coverage test
 
 all: clean build
 
@@ -28,10 +28,13 @@ run: build
 # Remove build artifacts
 clean:
 	$(CARGO) clean
+	cd $(VIM_DIR) && $(CARGO) clean
+	@rm -f *.aux *.log *.toc *.out *.pdf *.fls *.fdb_latexmk
+	@rm -rf tarpaulin-report.html index.html
 	@echo "Cleaned build files"
 
 # Build the binary in the vimversion directory
-vimmode:
+vimmode: clean
 	cd $(VIM_DIR) && $(CARGO) build --release
 	@echo "Built vim version: $(VIM_BIN)"
 
@@ -39,3 +42,31 @@ vimmode:
 vimmode-run: vimmode
 	env -u WAYLAND_DISPLAY $(VIM_BIN) --vim 100 100
 
+# Extension target
+ext1: clean
+	cd $(VIM_DIR) && $(CARGO) build --release
+	env -u WAYLAND_DISPLAY $(VIM_BIN) --vim 1000 1000
+
+ext1-run: ext1
+	env -u WAYLAND_DISPLAY $(VIM_BIN) --vim 1000 1000
+
+# Compile the LaTeX report
+docs:
+	$(CARGO) doc --open
+	cp target/doc/spreadsheet/index.html ./index.html
+	pdflatex report.tex
+	pdflatex report.tex
+	@echo "PDF report generated: report.pdf"
+
+# Run code coverage
+coverage: clean
+	$(CARGO) tarpaulin --out Html
+
+# Run tests
+test: clean
+	$(CARGO) test
+
+# Check clippy and fmt
+lit:
+	$(CARGO) fmt
+	$(CARGO) clippy

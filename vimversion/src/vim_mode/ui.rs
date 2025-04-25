@@ -10,8 +10,10 @@ use crossterm::{
 use std::io::{self, Write};
 
 use crate::vim_mode::commands::execute_command;
-use crate::vim_mode::editor::{EditorState, Mode, column_name, parse_cell_reference};
-use crate::{cell, get_col_index};
+use crate::vim_mode::editor::{
+    EditorState, Mode, column_name, formula_to_string, parse_cell_reference,
+};
+use crate::{Formula, HashSet, cell, evaluate_cell, get_col_index, parse_formula};
 
 /// Initializes the terminal for the Vim-like interface.
 pub fn init_terminal() -> io::Result<()> {
@@ -116,11 +118,13 @@ pub fn render_sheet(
     // Show formula or edit buffer depending on mode
     let formula = match state.mode {
         Mode::Insert => state.edit_buffer.clone(),
-        _ => sheet[state.cursor_row][state.cursor_col]
-            .formula
-            .as_ref()
-            .map(|f| f.to_string())
-            .unwrap_or_else(|| "".to_string()),
+        _ => {
+            if let Some(ref formula) = sheet[state.cursor_row][state.cursor_col].formula {
+                formula_to_string(formula)
+            } else {
+                "".to_string()
+            }
+        }
     };
 
     execute!(
@@ -263,15 +267,17 @@ fn handle_normal_mode(
         KeyCode::Char('v') => state.enter_visual_mode(),
         KeyCode::Char('y') => {
             // Yank (copy) current cell
-            let formula = sheet[state.cursor_row][state.cursor_col]
-                .formula
-                .clone()
-                .unwrap_or_else(|| sheet[state.cursor_row][state.cursor_col].val.to_string());
+            let formula_str =
+                if let Some(ref formula) = sheet[state.cursor_row][state.cursor_col].formula {
+                    formula_to_string(formula)
+                } else {
+                    sheet[state.cursor_row][state.cursor_col].val.to_string()
+                };
 
             state.clipboard = Some(crate::vim_mode::editor::ClipboardContent::Cell {
                 row: state.cursor_row,
                 col: state.cursor_col,
-                value: formula,
+                value: formula_str,
             });
 
             state.status_message = format!(
@@ -285,12 +291,38 @@ fn handle_normal_mode(
             if let Some(ref content) = state.clipboard {
                 match content {
                     crate::vim_mode::editor::ClipboardContent::Cell { value, .. } => {
-                        sheet[state.cursor_row][state.cursor_col].formula = Some(value.clone());
-                        state.status_message = format!(
-                            "Pasted to {}{}",
-                            column_name(state.cursor_col),
-                            state.cursor_row + 1
-                        );
+                        // Try to parse the formula string
+                        match parse_formula(value) {
+                            Ok(formula) => {
+                                sheet[state.cursor_row][state.cursor_col].formula = Some(formula);
+                                sheet[state.cursor_row][state.cursor_col].err = 0;
+                                state.status_message = format!(
+                                    "Pasted to {}{}",
+                                    column_name(state.cursor_col),
+                                    state.cursor_row + 1
+                                );
+                            }
+                            Err(_) => {
+                                // If parsing fails, try to interpret as a number
+                                if let Ok(val) = value.parse::<i32>() {
+                                    sheet[state.cursor_row][state.cursor_col].formula = None;
+                                    sheet[state.cursor_row][state.cursor_col].val = val;
+                                    sheet[state.cursor_row][state.cursor_col].err = 0;
+                                    state.status_message = format!(
+                                        "Pasted value {} to {}{}",
+                                        val,
+                                        column_name(state.cursor_col),
+                                        state.cursor_row + 1
+                                    );
+                                } else {
+                                    // Set as error
+                                    sheet[state.cursor_row][state.cursor_col].formula = None;
+                                    sheet[state.cursor_row][state.cursor_col].val = 0;
+                                    sheet[state.cursor_row][state.cursor_col].err = 1;
+                                    state.status_message = "Invalid formula or value".to_string();
+                                }
+                            }
+                        }
                     }
                     crate::vim_mode::editor::ClipboardContent::Range {
                         start_row,
@@ -309,8 +341,26 @@ fn handle_normal_mode(
                                 let target_col = state.cursor_col + j;
 
                                 if target_row < rows as usize && target_col < cols as usize {
-                                    sheet[target_row][target_col].formula =
-                                        Some(data[i][j].clone());
+                                    // Try to parse the formula string
+                                    match parse_formula(&data[i][j]) {
+                                        Ok(formula) => {
+                                            sheet[target_row][target_col].formula = Some(formula);
+                                            sheet[target_row][target_col].err = 0;
+                                        }
+                                        Err(_) => {
+                                            // If parsing fails, try to interpret as a number
+                                            if let Ok(val) = data[i][j].parse::<i32>() {
+                                                sheet[target_row][target_col].formula = None;
+                                                sheet[target_row][target_col].val = val;
+                                                sheet[target_row][target_col].err = 0;
+                                            } else {
+                                                // Set as error
+                                                sheet[target_row][target_col].formula = None;
+                                                sheet[target_row][target_col].val = 0;
+                                                sheet[target_row][target_col].err = 1;
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -322,6 +372,27 @@ fn handle_normal_mode(
                         );
                     }
                     _ => {}
+                }
+
+                // Create a temporary graph for dependency tracking
+                let total_cells = (rows * cols) as usize;
+                let mut graph = Vec::with_capacity(total_cells);
+                for _ in 0..total_cells {
+                    graph.push(Some(Box::new(crate::DAGNode {
+                        in_degree: 0,
+                        dependents: HashSet::new(),
+                        dependencies: HashSet::new(),
+                    })));
+                }
+
+                // Evaluate cells after pasting
+                let mut evaluated = vec![false; total_cells];
+                for r in 0..rows {
+                    for c in 0..cols {
+                        if sheet[r as usize][c as usize].formula.is_some() {
+                            evaluate_cell(r, c, sheet, &graph, &mut evaluated, rows, cols);
+                        }
+                    }
                 }
             }
         }
@@ -390,6 +461,27 @@ fn handle_insert_mode(
             // Apply the edit and return to normal mode
             state.apply_edit(sheet);
             state.enter_normal_mode();
+
+            // Create a temporary graph for dependency tracking
+            let total_cells = (rows * cols) as usize;
+            let mut graph = Vec::with_capacity(total_cells);
+            for _ in 0..total_cells {
+                graph.push(Some(Box::new(crate::DAGNode {
+                    in_degree: 0,
+                    dependents: HashSet::new(),
+                    dependencies: HashSet::new(),
+                })));
+            }
+
+            // Evaluate cells after editing
+            let mut evaluated = vec![false; total_cells];
+            for r in 0..rows {
+                for c in 0..cols {
+                    if sheet[r as usize][c as usize].formula.is_some() {
+                        evaluate_cell(r, c, sheet, &graph, &mut evaluated, rows, cols);
+                    }
+                }
+            }
         }
         KeyCode::Char(c) => {
             state.edit_buffer.push(c);
@@ -400,6 +492,28 @@ fn handle_insert_mode(
         KeyCode::Enter => {
             // Apply the edit, move to the next row, and stay in insert mode
             state.apply_edit(sheet);
+
+            // Create a temporary graph for dependency tracking
+            let total_cells = (rows * cols) as usize;
+            let mut graph = Vec::with_capacity(total_cells);
+            for _ in 0..total_cells {
+                graph.push(Some(Box::new(crate::DAGNode {
+                    in_degree: 0,
+                    dependents: HashSet::new(),
+                    dependencies: HashSet::new(),
+                })));
+            }
+
+            // Evaluate cells after editing
+            let mut evaluated = vec![false; total_cells];
+            for r in 0..rows {
+                for c in 0..cols {
+                    if sheet[r as usize][c as usize].formula.is_some() {
+                        evaluate_cell(r, c, sheet, &graph, &mut evaluated, rows, cols);
+                    }
+                }
+            }
+
             if state.cursor_row + 1 < rows as usize {
                 state.cursor_row += 1;
                 if state.cursor_row >= state.row_offset + 20 {
@@ -413,6 +527,28 @@ fn handle_insert_mode(
         KeyCode::Tab => {
             // Apply the edit, move to the next column, and stay in insert mode
             state.apply_edit(sheet);
+
+            // Create a temporary graph for dependency tracking
+            let total_cells = (rows * cols) as usize;
+            let mut graph = Vec::with_capacity(total_cells);
+            for _ in 0..total_cells {
+                graph.push(Some(Box::new(crate::DAGNode {
+                    in_degree: 0,
+                    dependents: HashSet::new(),
+                    dependencies: HashSet::new(),
+                })));
+            }
+
+            // Evaluate cells after editing
+            let mut evaluated = vec![false; total_cells];
+            for r in 0..rows {
+                for c in 0..cols {
+                    if sheet[r as usize][c as usize].formula.is_some() {
+                        evaluate_cell(r, c, sheet, &graph, &mut evaluated, rows, cols);
+                    }
+                }
+            }
+
             if state.cursor_col + 1 < cols as usize {
                 state.cursor_col += 1;
                 if state.cursor_col >= state.col_offset + 20 {
@@ -455,7 +591,28 @@ fn handle_command_mode(
             state.enter_normal_mode();
 
             match execute_command(&command, state, sheet, rows, cols) {
-                Ok(()) => {}
+                Ok(()) => {
+                    // Create a temporary graph for dependency tracking
+                    let total_cells = (rows * cols) as usize;
+                    let mut graph = Vec::with_capacity(total_cells);
+                    for _ in 0..total_cells {
+                        graph.push(Some(Box::new(crate::DAGNode {
+                            in_degree: 0,
+                            dependents: HashSet::new(),
+                            dependencies: HashSet::new(),
+                        })));
+                    }
+
+                    // Evaluate cells after command execution
+                    let mut evaluated = vec![false; total_cells];
+                    for r in 0..rows {
+                        for c in 0..cols {
+                            if sheet[r as usize][c as usize].formula.is_some() {
+                                evaluate_cell(r, c, sheet, &graph, &mut evaluated, rows, cols);
+                            }
+                        }
+                    }
+                }
                 Err(message) => {
                     if message == "quit" {
                         return Ok(false); // Exit the application
@@ -524,11 +681,13 @@ fn handle_visual_mode(
                 for i in 0..height {
                     let mut row_data = Vec::with_capacity(width);
                     for j in 0..width {
-                        let formula = sheet[min_row + i][min_col + j]
-                            .formula
-                            .clone()
-                            .unwrap_or_else(|| sheet[min_row + i][min_col + j].val.to_string());
-                        row_data.push(formula);
+                        let formula_str =
+                            if let Some(ref formula) = sheet[min_row + i][min_col + j].formula {
+                                formula_to_string(formula)
+                            } else {
+                                sheet[min_row + i][min_col + j].val.to_string()
+                            };
+                        row_data.push(formula_str);
                     }
                     data.push(row_data);
                 }
@@ -571,6 +730,27 @@ fn handle_visual_mode(
                     max_row + 1
                 );
                 state.enter_normal_mode();
+
+                // Create a temporary graph for dependency tracking
+                let total_cells = (rows * cols) as usize;
+                let mut graph = Vec::with_capacity(total_cells);
+                for _ in 0..total_cells {
+                    graph.push(Some(Box::new(crate::DAGNode {
+                        in_degree: 0,
+                        dependents: HashSet::new(),
+                        dependencies: HashSet::new(),
+                    })));
+                }
+
+                // Evaluate cells after deletion
+                let mut evaluated = vec![false; total_cells];
+                for r in 0..rows {
+                    for c in 0..cols {
+                        if sheet[r as usize][c as usize].formula.is_some() {
+                            evaluate_cell(r, c, sheet, &graph, &mut evaluated, rows, cols);
+                        }
+                    }
+                }
             }
         }
         _ => {}

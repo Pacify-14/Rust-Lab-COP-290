@@ -1,8 +1,11 @@
 //! Editor state and mode handling for the Vim-like interface.
+use crate::HashSet;
+use crate::{CellRef, Formula, cell, evaluate_cell, evaluate_formula, parse_formula};
 use egui::ViewportBuilder;
-use crate::{cell, evaluate_sheet};
 use std::process;
 use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
 
 /// Represents the current editing mode of the Vim-like interface.
 #[derive(PartialEq, Clone, Debug)]
@@ -106,9 +109,9 @@ impl EditorState {
             col_offset: 0, // Explicitly set to 0
             edit_buffer: String::new(),
             search_pattern: None,
-        search_forward: true,
-        search_matches: Vec::new(),
-        current_match: None,
+            search_forward: true,
+            search_matches: Vec::new(),
+            current_match: None,
         }
     }
     pub fn reset_view(&mut self) {
@@ -122,33 +125,34 @@ impl EditorState {
     pub fn enter_insert_mode(&mut self, sheet: &Vec<Vec<cell>>) {
         self.mode = Mode::Insert;
         self.status_message = String::from("-- INSERT MODE --");
-        
+
         // Initialize edit buffer with current cell's formula or value
         let row = self.cursor_row;
         let col = self.cursor_col;
-        
+
         if let Some(ref formula) = sheet[row][col].formula {
             // If it has a formula, show it with = prefix
-            self.edit_buffer = format!("={}", formula);
+            // We need to convert the Formula AST to a string representation
+            self.edit_buffer = format!("={}", formula_to_string(formula));
         } else {
             // Otherwise just show the value
             self.edit_buffer = sheet[row][col].val.to_string();
         }
     }
-    
+
     pub fn enter_normal_mode(&mut self) {
         self.mode = Mode::Normal;
         self.status_message = String::from("-- NORMAL MODE --");
         self.edit_buffer.clear();
     }
-    
+
     pub fn enter_command_mode(&mut self) {
         self.mode = Mode::Command;
         self.status_message = String::from("-- COMMAND MODE --");
         self.command_buffer.clear();
         self.command_buffer.push(':');
     }
-    
+
     pub fn enter_visual_mode(&mut self) {
         self.mode = Mode::Visual {
             start_row: self.cursor_row,
@@ -180,7 +184,7 @@ impl EditorState {
         // ONLY modify the cell at the current cursor position
         let row = self.cursor_row;
         let col = self.cursor_col;
-        
+
         if self.edit_buffer.is_empty() {
             // Clear the cell
             sheet[row][col].formula = None;
@@ -188,18 +192,88 @@ impl EditorState {
             sheet[row][col].err = 0;
         } else if self.edit_buffer.starts_with('=') {
             // It's a formula (starts with =)
-            let formula = self.edit_buffer[1..].to_string();
-            sheet[row][col].formula = Some(formula);
-            // Value will be calculated by evaluate_sheet
+            let formula_str = self.edit_buffer[1..].to_string();
+            // Parse the formula string into a Formula AST
+            match parse_formula(&formula_str) {
+                Ok(formula_ast) => {
+                    sheet[row][col].formula = Some(formula_ast);
+                    // Value will be calculated by evaluate_sheet
+                }
+                Err(_) => {
+                    // Invalid formula
+                    sheet[row][col].formula = None;
+                    sheet[row][col].val = 0;
+                    sheet[row][col].err = 1;
+                }
+            }
         } else if let Ok(value) = self.edit_buffer.parse::<i32>() {
             // It's a simple number
             sheet[row][col].formula = None;
             sheet[row][col].val = value;
             sheet[row][col].err = 0;
         } else {
-            // It's a formula without the = prefix
-            sheet[row][col].formula = Some(self.edit_buffer.clone());
-            // Value will be calculated by evaluate_sheet
+            // Try to parse as a formula without the = prefix
+            match parse_formula(&self.edit_buffer) {
+                Ok(formula_ast) => {
+                    sheet[row][col].formula = Some(formula_ast);
+                    // Value will be calculated by evaluate_sheet
+                }
+                Err(_) => {
+                    // Invalid formula
+                    sheet[row][col].formula = None;
+                    sheet[row][col].val = 0;
+                    sheet[row][col].err = 1;
+                }
+            }
+        }
+    }
+}
+
+// Helper function to convert Formula AST to string representation
+pub fn formula_to_string(formula: &Formula) -> String {
+    use crate::Formula::*;
+    use crate::Op;
+
+    match formula {
+        Literal(n) => n.to_string(),
+        Cell(cell_ref) => {
+            let col_name = column_name(cell_ref.col as usize);
+            format!("{}{}", col_name, cell_ref.row + 1)
+        }
+        Inc { base, offset } => {
+            let base_str = formula_to_string(&Cell(*base));
+            format!("{} + {}", base_str, offset)
+        }
+        Arith { op, left, right } => {
+            let op_str = match op {
+                Op::Add => "+",
+                Op::Sub => "-",
+                Op::Mul => "*",
+                Op::Div => "/",
+            };
+            format!(
+                "{} {} {}",
+                formula_to_string(left),
+                op_str,
+                formula_to_string(right)
+            )
+        }
+        Range { func, start, end } => {
+            let start_col = column_name(start.col as usize);
+            let end_col = column_name(end.col as usize);
+            format!(
+                "{}({}{}:{}{})",
+                func,
+                start_col,
+                start.row + 1,
+                end_col,
+                end.row + 1
+            )
+        }
+        SleepLiteral(n) => format!("SLEEP({})", n),
+        SleepCell(cell_ref) => {
+            let col_name = column_name(cell_ref.col as usize);
+            format!("SLEEP({}{})", col_name, cell_ref.row + 1)
         }
     }
 }
@@ -242,7 +316,8 @@ pub fn run_vim_interface(rows: i32, cols: i32) {
     let sheet = Arc::new(Mutex::new(sheet));
 
     // Check if we should use egui or terminal UI
-    if cfg!(feature = "egui") || true { // Always use egui for now
+    if true {
+        // Always use egui for now
         run_egui_interface(rows, cols, sheet);
     } else {
         run_terminal_interface(rows, cols, sheet);
@@ -252,27 +327,27 @@ pub fn run_vim_interface(rows: i32, cols: i32) {
 /// Runs the egui-based interface
 fn run_egui_interface(rows: i32, cols: i32, sheet: Arc<Mutex<Vec<Vec<cell>>>>) {
     let app = crate::vim_mode::egui_ui::SpreadsheetApp::new(rows, cols, sheet);
-    
+
     let mut native_options = eframe::NativeOptions::default();
 
-// Set only the fields you need
-native_options.viewport = ViewportBuilder::default()
-    .with_inner_size([1024.0, 768.0])
-    .with_min_inner_size([800.0, 600.0]);
+    // Set only the fields you need
+    native_options.viewport = ViewportBuilder::default()
+        .with_inner_size([1024.0, 768.0])
+        .with_min_inner_size([800.0, 600.0]);
 
-eframe::run_native(
-    "Vim Spreadsheet",
-    native_options,
-    Box::new(|_cc| Box::new(app)),
-)
-.expect("Failed to start egui application");
+    eframe::run_native(
+        "Vim Spreadsheet",
+        native_options,
+        Box::new(|_cc| Box::new(app)),
+    )
+    .expect("Failed to start egui application");
 }
 
 /// Runs the terminal-based interface
 fn run_terminal_interface(rows: i32, cols: i32, sheet_arc: Arc<Mutex<Vec<Vec<cell>>>>) {
     // Extract the sheet from Arc<Mutex<>> for terminal UI
     let mut sheet = sheet_arc.lock().unwrap().clone();
-    
+
     // Initialize editor state
     let mut state = EditorState::new();
     state.reset_view();
@@ -292,17 +367,44 @@ fn run_terminal_interface(rows: i32, cols: i32, sheet_arc: Arc<Mutex<Vec<Vec<cel
         if let Err(e) = crate::vim_mode::ui::render_sheet(&sheet, &state, rows, cols) {
             cleanup_and_exit(&e.to_string());
         }
-        
+
         // Handle input
         match crate::vim_mode::ui::handle_input(&mut state, &mut sheet, rows, cols) {
             Ok(true) => {
                 // Continue running
-                evaluate_sheet(rows, cols, &mut sheet);
-            },
+                // Create a graph for dependency tracking
+                let total_cells = (rows * cols) as usize;
+                let mut graph = Vec::with_capacity(total_cells);
+                for _ in 0..total_cells {
+                    graph.push(Some(Box::new(crate::DAGNode {
+                        in_degree: 0,
+                        dependents: HashSet::new(),
+                        dependencies: HashSet::new(),
+                    })));
+                }
+
+                // Evaluate cells that need updating
+                let mut evaluated = vec![false; total_cells];
+                for r in 0..rows {
+                    for c in 0..cols {
+                        if sheet[r as usize][c as usize].formula.is_some() {
+                            crate::evaluate_cell(
+                                r,
+                                c,
+                                &mut sheet,
+                                &graph,
+                                &mut evaluated,
+                                rows,
+                                cols,
+                            );
+                        }
+                    }
+                }
+            }
             Ok(false) => {
                 // Exit requested
                 break;
-            },
+            }
             Err(e) => {
                 cleanup_and_exit(&e.to_string());
             }

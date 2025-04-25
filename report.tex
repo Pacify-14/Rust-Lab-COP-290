@@ -1,0 +1,200 @@
+\documentclass{article}
+\usepackage{graphicx} % Required for inserting images
+\usepackage{hyperref}
+
+\title{Explains design and software architecture}
+\author{
+  Subhash Malaviya (2023CS10749) \\
+  Soumodeep Chatterjee (2023CS50299) \\ 
+  Shashank Kumar (2023CS10020)
+}
+\date{April 2025}
+
+\begin{document}
+
+\maketitle
+
+\section*{Team Members}
+
+\noindent
+\parbox{\textwidth}{
+  SUBHASH MALAVIYA (2023CS10749)\\
+  SOUMODEEP CHATTERJEE (2023CS50299)\\
+  SHASHANK KUMAR (2023CS10020)
+}
+
+\section*{GitHub Repository}
+
+The complete source code and documentation are available at: 
+
+\noindent
+\url{https://github.com/Pacify-14/Rust-Lab-COP-290}
+
+\section{Why Proposed Extension Could Not Be Fully Implemented}
+
+While the core Vim-like terminal and GUI-based spreadsheet functionality was successfully implemented, several proposed extensions could not be realized due to time and complexity constraints. In particular:
+\begin{itemize}
+  \item \textbf{Chart and Data Visualization} features like statistical plots, time series, and correlation graphs were not implemented.
+  \item \textbf{Custom mathematical functions}, hierarchical expression parsing, and dynamic formula libraries were left out.
+  \item \textbf{Smart data management features} such as filtering by Boolean conditions or dynamic query execution were not developed.
+  \item \textbf{Performance optimizations} like parallel formula evaluation and lazy evaluation were planned but not implemented.
+  \item \textbf{Automated testing frameworks} including property-based testing were proposed but not incorporated.
+\end{itemize}
+
+\section{Could We Implement Extra Extensions Over and Above the Proposal?}
+
+Yes, some enhancements were implemented that went beyond the originally proposed scope:
+\begin{itemize}
+  \item A fully-functional \textbf{GUI-based interface} using the \texttt{egui} framework in addition to the terminal interface.
+  \item \textbf{Visual selection support} in the GUI and TUI for range operations like copying and pasting ranges.
+  \item \textbf{File format flexibility}, including support for CSV, TSV, and a custom SS format with formula preservation.
+\end{itemize}
+
+\section{Primary Data Structures Used}
+
+\begin{itemize}
+  \item \texttt{Vec<Vec<cell>>} – A 2D vector used as the spreadsheet grid.
+  \item \texttt{cell} struct – Stores individual cell state including value, formula, and error flag.
+  \item \texttt{EditorState} – Maintains UI mode, cursor position, selection range, and buffer states.
+  \item \texttt{ClipboardContent} enum – Encapsulates cell, row, column, and range data for copy-paste operations.
+  \item \texttt{DAGNode} and \texttt{Node} – Represent the dependency graph for formula evaluation.
+\end{itemize}
+
+\section{Interfaces Between Software Modules}
+
+The architecture is modularized as follows:
+\begin{itemize}
+  \item \textbf{core logic} (formula parsing, evaluation) in \texttt{main.rs}
+  \item \textbf{editor state and modes} in \texttt{editor.rs}
+  \item \textbf{terminal interface} in \texttt{ui.rs}
+  \item \textbf{GUI interface} in \texttt{egui\_ui.rs}
+  \item \textbf{command execution} in \texttt{commands.rs}
+\end{itemize}
+
+\section{Approaches for Encapsulation}
+
+Encapsulation was maintained by:
+\begin{itemize}
+  \item Defining stateful structs like \texttt{EditorState} with controlled access to internal fields.
+  \item Using enums like \texttt{Mode} and \texttt{ClipboardContent} for explicit mode/state management.
+  \item Separating interface logic from core logic and data manipulation routines.
+\end{itemize}
+
+\section{Justification of Design}
+
+This design enables:
+\begin{itemize}
+  \item \textbf{Robust terminal and GUI interaction} via mode-specific input handling.
+  \item \textbf{High extensibility}, allowing new commands and UI features to be integrated with minimal change.
+  \item \textbf{User efficiency}, leveraging familiar Vim-like controls.
+  \item \textbf{Clean separation of concerns}, which improves code maintainability and testability.
+\end{itemize}
+
+\section{Modifications to the Initial Design}
+
+The following deviations were made from the original proposal:
+\begin{itemize}
+  \item Inclusion of the \texttt{egui}-based graphical interface, which was not originally planned.
+  \item Reduction of scope in terms of visualization and advanced querying features to prioritize core spreadsheet stability.
+  \item Extended copy-paste functionality to support entire rows and columns, beyond individual cells.
+\end{itemize}
+
+\section{Code Architecture and Workflow}
+
+\subsection{Overview of Functionality}
+
+The Vim-like spreadsheet is a terminal and GUI-based editor developed in Rust. It supports multiple editing modes, efficient keyboard navigation, expression evaluation, and formula-based cell dependencies. The interface mimics \texttt{vim} behavior, offering modes like \texttt{Normal}, \texttt{Insert}, \texttt{Visual}, and \texttt{Command} for power users.
+
+\subsection{Core Module Responsibilities}
+
+\begin{itemize}
+  \item \textbf{\texttt{main.rs}}: Entry point and core logic. It handles formula parsing, topological evaluation using a dependency graph (DAG), scroll commands, and command-line input.
+  \item \textbf{\texttt{editor.rs}}: Manages editor state and mode transitions. It defines the \texttt{EditorState} struct and modes (Insert, Normal, Visual, Command). Also handles edit buffer and clipboard.
+  \item \textbf{\texttt{ui.rs}}: Implements the terminal-based UI using the \texttt{crossterm} crate. It renders the spreadsheet grid, cursor, and status bar, and processes keyboard input based on the current mode.
+  \item \textbf{\texttt{egui\_ui.rs}}: Provides an optional GUI interface using \texttt{eframe} and \texttt{egui}. It supports mouse and keyboard events, colored mode banners, and cell-based interactions.
+  \item \textbf{\texttt{commands.rs}}: Parses and executes \texttt{:commands} in Command mode, including \texttt{:w}, \texttt{:q}, \texttt{:e}, search/replace, and batch operations.
+  \item \textbf{\texttt{mod.rs}}: Central re\-export module that links together the \texttt{commands}, \texttt{editor}, \texttt{ui}, and \texttt{egui\_ui} modules under the \texttt{vim\_mode} namespace.
+\end{itemize}
+
+\subsection{Data Flow and Evaluation}
+
+The spreadsheet grid is represented as a \texttt{Vec<Vec<cell>>}, where each \texttt{cell} stores:
+\begin{itemize}
+  \item An optional formula string
+  \item An evaluated integer value
+  \item An error flag (1 if invalid, 0 otherwise)
+\end{itemize}
+
+When a formula is entered, it is parsed and stored in the cell. During evaluation, a dependency graph (\texttt{Vec<DAGNode>}) is built. A topological sort ensures cells are evaluated in correct order, respecting dependencies and propagating errors.
+
+Supported formulas include:
+\begin{itemize}
+  \item Arithmetic: \texttt{A1 + B2}, \texttt{3 * C3}
+  \item Aggregates: \texttt{SUM(A1:A5)}, \texttt{AVG(B1:B3)}
+  \item Functions: \texttt{SLEEP(3)}, \texttt{SLEEP(B2)}
+\end{itemize}
+
+\subsection{Interaction Flow}
+
+\begin{enumerate}
+  \item \textbf{Startup:} The program initializes the grid and starts in Normal mode.
+  \item \textbf{Navigation:} Users move the cursor using \texttt{h, j, k, l}.
+  \item \textbf{Editing:} Pressing \texttt{i} enters Insert mode, where formulas or values can be typed.
+  \item \textbf{Command execution:} Pressing \texttt{:} enters Command mode. Commands like \texttt{:wq}, \texttt{:e filename}, or \texttt{:A1} are parsed and executed.
+  \item \textbf{Visual selection:} Pressing \texttt{v} activates Visual mode to select ranges for copy/paste.
+  \item \textbf{Evaluation:} After edit or file load, the sheet is re-evaluated using a DAG-based topological traversal.
+\end{enumerate}
+
+\subsection{Formula Evaluation Example}
+
+Given:
+\begin{verbatim}
+A1 = 5
+A2 = A1 + 3
+A3 = SUM(A1:A2)
+\end{verbatim}
+
+The evaluation order will be:
+\begin{itemize}
+  \item \texttt{A1}: directly assigned value 5
+  \item \texttt{A2}: depends on \texttt{A1}, evaluates to 8
+  \item \texttt{A3}: range sum of A1 and A2 = 13
+\end{itemize}
+
+\subsection{Clipboard Functionality}
+
+Copying is done using \texttt{y}, pasting with \texttt{p}. Clipboard supports:
+\begin{itemize}
+  \item Single cells
+  \item Rows and columns
+  \item Arbitrary rectangular ranges
+\end{itemize}
+
+These are stored using the \texttt{ClipboardContent} enum.
+
+\subsection{Error Handling}
+
+\texttt{ERR} is displayed in cells with:
+\begin{itemize}
+  \item Invalid formulas
+  \item Circular dependencies
+  \item References to error cells
+\end{itemize}
+
+\subsection{Search and Replace}
+
+Searches can be performed using \texttt{/pattern} and \texttt{?pattern}. Matches are navigated using \texttt{n/N}. Replace is done using \texttt{:s/old/new/g}.
+
+\subsection{Extensibility}
+
+The modular design makes it easy to:
+\begin{itemize}
+  \item Add new commands in \texttt{commands.rs}
+  \item Extend formula parsing in \texttt{main.rs}
+  \item Introduce new modes via \texttt{editor.rs}
+  \item Improve visualization using \texttt{egui\_ui.rs}
+\end{itemize}
+
+
+\end{document}
+
