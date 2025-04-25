@@ -29,7 +29,7 @@ run: build
 clean:
 	$(CARGO) clean
 	cd $(VIM_DIR) && $(CARGO) clean
-	@rm -f *.aux *.log *.toc *.out *.pdf *.fls *.fdb_latexmk
+	@rm -f *.aux *.log *.toc *.out *.fls *.fdb_latexmk
 	@rm -rf tarpaulin-report.html index.html
 	@echo "Cleaned build files"
 
