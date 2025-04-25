@@ -61,7 +61,7 @@ A powerful spreadsheet editor with Vim-like keybindings and commands, offering a
 ### Search
 
 - `/pattern` - Search forward for pattern
-- `?pattern` - Search backward for pattern
+- `?pattern` - Search for pattern
 - `n` - Go to next match
 
 
