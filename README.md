@@ -166,7 +166,7 @@ A powerful spreadsheet editor with Vim-like keybindings and commands, offering a
 | `make clean` | Remove all build artifacts |
 | `make coverage` | Testing coverage |
 | `make test` | Running tests |
-| `make docs` | Generating docs |
+| `make docs` | Generating rust doc and report.pdf  |
 | `make ext1` | Running extensions |
 
 ## For make docs
